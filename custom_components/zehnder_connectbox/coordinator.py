@@ -30,13 +30,14 @@ from .profiles import (
     CAPTURE_PROPERTY_GROUPS,
     CAPTURE_TIME_BUDGET,
     FILTER_RUNTIME,
+    ROOM_STATE_FAN_CLASS,
     SUPPLY_ONLY_CANDIDATE,
     format_version,
     product_name,
     supply_only_candidate_key,
     supports_sensor_status,
 )
-from .protocol import ProtocolError
+from .protocol import ProtocolError, room_state_record
 from .session import GatewayResponseError
 from .transport import CertificateMismatchError, TransportError
 
@@ -193,6 +194,33 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         self._last_filter_property_refresh = self._last_property_refresh
         self._accept_command_snapshot(snapshot)
 
+    def _start_test_write(self, **details: object) -> dict[str, object]:
+        """Temporary test build: add a pending entry to the test-write log."""
+        record: dict[str, object] = {
+            "at": dt_util.utcnow().isoformat(timespec="seconds"),
+            **details,
+            "result": "pending",
+        }
+        self.candidate_writes.append(record)
+        del self.candidate_writes[:-CANDIDATE_WRITE_LOG_SIZE]
+        return record
+
+    async def _run_test_write(
+        self, record: dict[str, object], job, *args
+    ) -> GatewaySnapshot:
+        """Temporary test build: run a test write and log the gateway's answer."""
+        try:
+            async with self._io_lock:
+                snapshot = await self.hass.async_add_executor_job(job, *args)
+        except GatewayResponseError as err:
+            record["result"] = f"rejected with result {err.result}"
+            raise
+        except Exception as err:
+            record["result"] = f"failed: {type(err).__name__}: {err}"[:160]
+            raise
+        record["result"] = "confirmed"
+        return snapshot
+
     async def async_write_supply_only_candidate(
         self, device_id: int, value: int
     ) -> None:
@@ -202,27 +230,46 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         if key is None:
             raise ProtocolError("the test property is not available for this device")
 
-        record: dict[str, object] = {
-            "at": dt_util.utcnow().isoformat(timespec="seconds"),
-            "device": device_id,
-            "property": ".".join(str(part) for part in SUPPLY_ONLY_CANDIDATE),
-            "value": value,
-            "result": "pending",
-        }
-        self.candidate_writes.append(record)
-        del self.candidate_writes[:-CANDIDATE_WRITE_LOG_SIZE]
-        try:
-            async with self._io_lock:
-                snapshot = await self.hass.async_add_executor_job(
-                    self.client.write_supply_only_candidate, device_id, key, value
-                )
-        except GatewayResponseError as err:
-            record["result"] = f"rejected with result {err.result}"
-            raise
-        except Exception as err:
-            record["result"] = f"failed: {type(err).__name__}"
-            raise
-        record["result"] = "confirmed"
+        record = self._start_test_write(
+            device=device_id,
+            target="property " + ".".join(str(part) for part in SUPPLY_ONLY_CANDIDATE),
+            value=value,
+        )
+        snapshot = await self._run_test_write(
+            record, self.client.write_supply_only_candidate, device_id, key, value
+        )
+        self._last_property_refresh = time.monotonic()
+        self._accept_command_snapshot(snapshot)
+
+    async def async_write_room_state_test(self, device_id: int, value: int) -> None:
+        """Temporary test build: write the room's fan record byte and log it.
+
+        The log keeps the record's first byte as the gateway reports it after
+        the write, so a stored but ignored value can be told apart.
+        """
+        data = self.data.find_device(device_id) if self.data is not None else None
+        room = data[0] if data is not None else None
+        if room is None or room_state_record(room, ROOM_STATE_FAN_CLASS) is None:
+            raise ProtocolError("the room has no fan record to write")
+
+        record = self._start_test_write(
+            device=device_id,
+            room=room.room_id,
+            target=f"room record class {ROOM_STATE_FAN_CLASS} byte 0",
+            value=value,
+        )
+        snapshot = await self._run_test_write(
+            record,
+            self.client.write_room_state_test,
+            room.room_id,
+            ROOM_STATE_FAN_CLASS,
+            value,
+        )
+        updated = next(
+            (item for item in snapshot.rooms if item.room_id == room.room_id), None
+        )
+        stored = room_state_record(updated, ROOM_STATE_FAN_CLASS)
+        record["read_back"] = stored[0] if stored else None
         self._last_property_refresh = time.monotonic()
         self._accept_command_snapshot(snapshot)
 

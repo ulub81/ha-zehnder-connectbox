@@ -113,8 +113,19 @@ CAPTURE_TIME_BUDGET = 40.0
 # in between. Two diagnostic buttons write it, to test whether the unit accepts
 # it as a command.
 SUPPLY_ONLY_CANDIDATE = (38, 0, 5)
-SUPPLY_ONLY_CANDIDATE_VALUES = (0, 1)
+# Writing 0 was confirmed by the gateway but did not stop the exhaust fan, so
+# only 1 is left: it was written once while supply-only operation was on, and
+# whether that ended it is still open.
+SUPPLY_ONLY_CANDIDATE_VALUES = (1,)
 CANDIDATE_WRITE_LOG_SIZE = 20
+
+# Temporary test build: room field 101 holds one record per device class,
+# {1: {1: class}, 2: 8 bytes}. In the living room, the first byte of the fan
+# record (class 38) was 1 while supply-only operation was on and 0 after it
+# was switched off at the unit. Two diagnostic buttons write the room back
+# with only that byte changed, to test whether the gateway passes it on.
+ROOM_STATE_FAN_CLASS = 38
+ROOM_STATE_TEST_VALUES = (0, 1)
 
 
 def supply_only_candidate_key(device: AttachedDevice) -> PropertyKey | None:
@@ -142,6 +153,7 @@ def supply_only_candidate_key(device: AttachedDevice) -> PropertyKey | None:
                 property_id,
             )
     return None
+
 
 # Sensor types in a unit's sensor list (device field 8 of the room model).
 SENSOR_TYPE_TEMPERATURE = 1
