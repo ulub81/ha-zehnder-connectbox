@@ -50,7 +50,7 @@ def prop(key, value: bytes) -> bytes:
     return encode_bytes(101, encode_bytes(1, key_message) + encode_bytes(2, value))
 
 
-def rooms_message(properties=()) -> bytes:
+def rooms_message(properties=(), extra=b"") -> bytes:
     device = b"".join(
         [
             encode_uint(1, 7),
@@ -75,6 +75,7 @@ def rooms_message(properties=()) -> bytes:
             encode_uint(22, 15),
             encode_bytes(23, b"Some text"),
             encode_uint(61, 1790881200),
+            extra,
         ]
     )
     return encode_bytes(1, room)
@@ -168,10 +169,11 @@ def test_capture_without_targets_reads_state():
 
 
 class FakeCoordinator:
-    def __init__(self, data, capture):
+    def __init__(self, data, capture, candidate_writes=()):
         self.data = data
         self.last_update_success = True
         self._capture = capture
+        self.candidate_writes = list(candidate_writes)
 
     async def async_capture(self):
         if isinstance(self._capture, Exception):
@@ -187,8 +189,12 @@ def snapshot(summer=0):
     )
 
 
-def diagnostics_for(capture):
-    entry = SimpleNamespace(runtime_data=FakeCoordinator(snapshot(), capture), version=1)
+def diagnostics_for(capture, candidate_writes=(), data=None):
+    entry = SimpleNamespace(
+        runtime_data=FakeCoordinator(snapshot(), capture, candidate_writes),
+        version=1,
+        data=data or {},
+    )
     return asyncio.run(diagnostics.async_get_config_entry_diagnostics(None, entry))
 
 
@@ -211,7 +217,7 @@ def test_diagnostics_capture_fresh_read():
     assert fields["room[1].f21"] == 4
     assert fields["room[1].f22"] == 15
     assert fields["room[1].f61"] == 1790881200
-    assert fields["room[1].f23"] == "bytes(len=9)"
+    assert fields["room[1].f23"] == "text(len=9)"
     assert fields["room[1].vent[awake].f2"] == 5
     assert fields["room[1].vent[away].f2"] == 0
     assert fields["room[1].device[7].f8.f2"] == 51
@@ -236,3 +242,58 @@ def test_diagnostics_capture_falls_back_to_last_poll():
     }
     assert "attached_devices" in result
 
+
+
+GATEWAY_UUID = "6d0e2a8c-1f4b-4c39-9a52-0f6e1d7b3c41"
+
+
+def fixed32(number: int, value: int) -> bytes:
+    return bytes([number << 3 | 5]) + value.to_bytes(4, "little")
+
+
+def test_diagnostics_probe_unknown_room_field():
+    unknown = b"".join(
+        [
+            encode_uint(1, 3),
+            encode_bytes(2, SERIAL.encode()),
+            encode_bytes(3, encode_uint(1, 38) + encode_uint(2, 5)),
+            encode_bytes(4, b"\x00"),
+            fixed32(5, 42),
+            encode_bytes(6, uuid.UUID(GATEWAY_UUID).bytes),
+            encode_bytes(7, b"Wohnzimmer Sofa"),
+            encode_bytes(8, bytes(range(200, 212))),
+        ]
+    )
+    fresh_rooms = decode_rooms(rooms_message(extra=encode_bytes(101, unknown)))
+    result = diagnostics_for(
+        (decode_run_state(run_state_message(0)), fresh_rooms, {}),
+        data={"gateway_uuid": GATEWAY_UUID},
+    )
+    probe = result["capture"]["fields"]["room[1].f101"]
+    assert probe == {
+        "f1": 3,
+        "f2": "same as room[1].device[7].f2",
+        "f3": {"f1": 38, "f2": 5},
+        "f4": {"hex": "00"},
+        "f5": {"hex": "2a000000", "uint_le": 42},
+        "f6": "same as gateway_uuid",
+        "f7": "text(len=15)",
+        "f8": "bytes(len=12)",
+    }
+    text = json_bytes(result).decode()
+    assert SERIAL not in text
+    assert ROOM_NAME not in text
+    assert "Sofa" not in text
+    assert uuid.UUID(GATEWAY_UUID).hex not in text
+
+
+def test_diagnostics_probe_short_raw_value():
+    fresh_rooms = decode_rooms(rooms_message(extra=encode_bytes(101, b"\xff\xff")))
+    result = diagnostics_for((decode_run_state(run_state_message(0)), fresh_rooms, {}))
+    assert result["capture"]["fields"]["room[1].f101"] == {"hex": "ffff"}
+
+
+def test_diagnostics_lists_candidate_writes():
+    writes = [{"device": 7, "property": "38.0.5", "value": 0, "result": "confirmed"}]
+    result = diagnostics_for(TimeoutError(), candidate_writes=writes)
+    assert result["capture"]["candidate_writes"] == writes
