@@ -81,6 +81,7 @@ integration to operate.
 | --- | --- | --- |
 | Central ventilation | Switch | Places the complete connected system in standby or restores the last active mode |
 | Operating mode | Select | Automatic, manual, antifreeze, or off |
+| Situation | Select | Active situation of the official app; selecting At home or Away switches to the manual mode |
 | Summer ventilation | Binary sensor | Whether the summer ventilation defined in the official app is running |
 
 The ConnectBox firmware version is shown in its Home Assistant device
@@ -109,6 +110,8 @@ information when reported by the gateway.
 | Signal strength | Diagnostic sensor | Radio signal strength between the unit and ConnectBox |
 | Level at home, asleep, away, frost protection | Configuration select | Configured level of the unit's room for each situation of the official app |
 | Temporary change until | Sensor | End of a temporary change, such as a level changed on the unit's control panel; unknown while none is active |
+| Boost | Switch | Runs the boost of the unit's room for the duration set in the official app, or ends it early |
+| Boost until | Sensor | End of a running boost; unknown while none is running |
 | Reset filter timer | Configuration button | Resets the filter counter after filter maintenance; currently verified for ComfoSpot 50 |
 
 The ventilation fan entity provides Home Assistant's standard power and speed

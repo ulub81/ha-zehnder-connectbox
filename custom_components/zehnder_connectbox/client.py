@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from collections.abc import Callable
 from uuid import UUID, uuid4
 
 from .const import (
@@ -21,6 +22,7 @@ from .models import (
     Room,
     RunMode,
     RunState,
+    TemperatureMode,
     VersionInfo,
 )
 from .profiles import is_supported, property_specs_for_device, supports_sensor_mode
@@ -36,6 +38,7 @@ from .protocol import (
     encode_pairing,
     encode_property_request,
     encode_property_update,
+    encode_room_boost,
     encode_room_level,
     encode_run_state,
 )
@@ -46,6 +49,16 @@ PAIRING_NICKNAME = "Home Assistant"
 PROPERTY_SETTLE_TIMEOUT = 5.0
 LEVEL_SETTLE_TIMEOUT = 5.0
 LEVEL_SETTLE_POLL_INTERVAL = 0.5
+COMMAND_SETTLE_TIMEOUT = 10.0
+BOOST_MINUTES_DEFAULT = 15
+BOOST_MINUTES_MIN = 15
+BOOST_MINUTES_MAX = 120
+# The app's manual mode offers the situations at home and away. The run-state
+# update carries them as the user location next to the run mode.
+SITUATION_LOCATIONS = {
+    TemperatureMode.AWAKE: 1,
+    TemperatureMode.AWAY: 2,
+}
 
 
 class PairingError(ConnectionError):
@@ -207,6 +220,80 @@ class ConnectBoxClient:
         except (ProtocolError, TransportError):
             self.close()
             raise
+
+    def set_situation(self, temperature_mode: int) -> GatewaySnapshot:
+        """Select a situation of the manual mode and confirm it was applied."""
+        location = SITUATION_LOCATIONS.get(TemperatureMode(temperature_mode))
+        if location is None:
+            raise ValueError("only the situations at home and away can be selected")
+        try:
+            self._connected_session().request(
+                OperationType.SET_RUN_STATE_REQUEST,
+                OperationType.SET_RUN_STATE_CONFIRM,
+                encode_run_state(int(RunMode.MANUAL), location),
+            )
+            run_state = self._wait_for(
+                self._read_run_state,
+                lambda state: state.run_mode == RunMode.MANUAL
+                and state.temperature_mode == temperature_mode,
+            )
+            if (
+                run_state.run_mode != RunMode.MANUAL
+                or run_state.temperature_mode != temperature_mode
+            ):
+                raise ProtocolError(
+                    "gateway reported run mode "
+                    f"{run_state.run_mode} and situation {run_state.temperature_mode}"
+                )
+            return self.read_snapshot(refresh_properties=False)
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    def set_boost(self, room_id: int, enabled: bool) -> GatewaySnapshot:
+        """Start a boost for the room's configured duration, or end it early."""
+        try:
+            room = self._find_room(self._read_rooms(), room_id)
+            boost_until = None
+            if enabled:
+                minutes = min(
+                    max(room.boost_duration or BOOST_MINUTES_DEFAULT, BOOST_MINUTES_MIN),
+                    BOOST_MINUTES_MAX,
+                )
+                boost_until = int(time.time()) + minutes * 60
+            self._connected_session().request(
+                OperationType.SET_ROOM_REQUEST,
+                OperationType.SET_ROOM_CONFIRM,
+                encode_room_boost(room, boost_until),
+            )
+            rooms = self._wait_for(
+                self._read_rooms,
+                lambda rooms: self._find_room(rooms, room_id).boost_active(time.time())
+                is enabled,
+            )
+            if self._find_room(rooms, room_id).boost_active(time.time()) is not enabled:
+                raise ProtocolError("gateway did not confirm the boost change")
+            return self.read_snapshot(refresh_properties=False)
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    @staticmethod
+    def _find_room(rooms: tuple[Room, ...], room_id: int) -> Room:
+        room = next((item for item in rooms if item.room_id == room_id), None)
+        if room is None:
+            raise ProtocolError("room is no longer available")
+        return room
+
+    @staticmethod
+    def _wait_for[T](read: Callable[[], T], condition: Callable[[T], bool]) -> T:
+        """Poll a gateway value until it meets the condition or time runs out."""
+        deadline = time.monotonic() + COMMAND_SETTLE_TIMEOUT
+        while True:
+            value = read()
+            if condition(value) or time.monotonic() >= deadline:
+                return value
+            time.sleep(LEVEL_SETTLE_POLL_INTERVAL)
 
     def _wait_for_room_level(self, room_id: int, level: int) -> None:
         """Briefly wait until the room's current level reports a written value.

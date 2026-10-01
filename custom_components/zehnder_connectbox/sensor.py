@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -63,6 +64,13 @@ def _temporary_until(room: Room) -> datetime | None:
     return datetime.fromtimestamp(room.temporary_until, UTC)
 
 
+def _boost_until(room: Room) -> datetime | None:
+    """Return the end of the room's boost while one is running."""
+    if room.boost_until is None or not room.boost_active(time.time()):
+        return None
+    return datetime.fromtimestamp(room.boost_until, UTC)
+
+
 SENSORS = (
     ConnectBoxSensorDescription(
         key="extract_air_temperature",
@@ -112,6 +120,14 @@ SENSORS = (
         device_class=SensorDeviceClass.TIMESTAMP,
         value_fn=lambda device: None,
         room_value_fn=_temporary_until,
+        available_without_value=True,
+    ),
+    ConnectBoxSensorDescription(
+        key="boost_until",
+        translation_key="boost_until",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda device: None,
+        room_value_fn=_boost_until,
         available_without_value=True,
     ),
     ConnectBoxSensorDescription(

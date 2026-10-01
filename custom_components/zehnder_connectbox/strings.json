@@ -180,6 +180,16 @@
           "level_4": "Level 4",
           "auto": "Auto (sensor)"
         }
+      },
+      "situation": {
+        "name": "Situation",
+        "state": {
+          "awake": "At home",
+          "asleep": "Asleep",
+          "away": "Away",
+          "antifreeze": "Frost protection",
+          "override": "Temporary change"
+        }
       }
     },
     "sensor": {
@@ -215,11 +225,17 @@
       },
       "temporary_until": {
         "name": "Temporary change until"
+      },
+      "boost_until": {
+        "name": "Boost until"
       }
     },
     "switch": {
       "central_ventilation": {
         "name": "Central ventilation"
+      },
+      "boost": {
+        "name": "Boost"
       }
     }
   }
