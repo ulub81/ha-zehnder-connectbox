@@ -11,6 +11,11 @@ project follows [Semantic Versioning](https://semver.org/).
   board of ComfoSpot 50 units that report them.
 - Include the current level, the humidity and CO2 readings, and readings of
   not yet mapped sensor types in the diagnostics.
+- Show whether the summer ventilation defined in the official app is running.
+- Configure each room's level for the app's situations (at home, asleep,
+  away, frost protection) from Home Assistant.
+- Show when a temporary change of a room ends, such as a level changed on the
+  unit's control panel.
 
 ### Changed
 

@@ -106,6 +106,13 @@
           "off": "Not available",
           "on": "Available"
         }
+      },
+      "summer_ventilation": {
+        "name": "Summer ventilation",
+        "state": {
+          "off": "Inactive",
+          "on": "Active"
+        }
       }
     },
     "fan": {
@@ -128,6 +135,50 @@
           "automatic": "Automatic",
           "manual": "Manual",
           "off": "Off"
+        }
+      },
+      "situation_level_awake": {
+        "name": "Level at home",
+        "state": {
+          "standby": "Standby",
+          "level_1": "Level 1",
+          "level_2": "Level 2",
+          "level_3": "Level 3",
+          "level_4": "Level 4",
+          "auto": "Auto (sensor)"
+        }
+      },
+      "situation_level_asleep": {
+        "name": "Level asleep",
+        "state": {
+          "standby": "Standby",
+          "level_1": "Level 1",
+          "level_2": "Level 2",
+          "level_3": "Level 3",
+          "level_4": "Level 4",
+          "auto": "Auto (sensor)"
+        }
+      },
+      "situation_level_away": {
+        "name": "Level away",
+        "state": {
+          "standby": "Standby",
+          "level_1": "Level 1",
+          "level_2": "Level 2",
+          "level_3": "Level 3",
+          "level_4": "Level 4",
+          "auto": "Auto (sensor)"
+        }
+      },
+      "situation_level_antifreeze": {
+        "name": "Level frost protection",
+        "state": {
+          "standby": "Standby",
+          "level_1": "Level 1",
+          "level_2": "Level 2",
+          "level_3": "Level 3",
+          "level_4": "Level 4",
+          "auto": "Auto (sensor)"
         }
       }
     },
@@ -161,6 +212,9 @@
       },
       "co2": {
         "name": "CO2"
+      },
+      "temporary_until": {
+        "name": "Temporary change until"
       }
     },
     "switch": {

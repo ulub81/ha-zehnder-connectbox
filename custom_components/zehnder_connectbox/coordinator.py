@@ -98,11 +98,13 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         self._register_devices(snapshot)
         return snapshot
 
-    async def async_set_level(self, room_id: int, level: int) -> None:
-        """Set and confirm a room ventilation level."""
+    async def async_set_level(
+        self, room_id: int, level: int, temperature_mode: int | None = None
+    ) -> None:
+        """Set and confirm a room level for the active or a given situation."""
         async with self._io_lock:
             snapshot = await self.hass.async_add_executor_job(
-                self.client.set_level, room_id, level
+                self.client.set_level, room_id, level, temperature_mode
             )
         self._accept_command_snapshot(snapshot)
 

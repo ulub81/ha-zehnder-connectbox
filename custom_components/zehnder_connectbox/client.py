@@ -160,8 +160,13 @@ class ConnectBoxClient:
             self.close()
             raise
 
-    def set_level(self, room_id: int, level: int) -> GatewaySnapshot:
-        """Set one room's active fan level or sensor mode and read back the result."""
+    def set_level(
+        self, room_id: int, level: int, temperature_mode: int | None = None
+    ) -> GatewaySnapshot:
+        """Set a room's level for the active or a given situation and read back.
+
+        Without a temperature mode, the currently active situation is changed.
+        """
         if level not in VENTILATION_LEVELS and level != SENSOR_MODE_LEVEL:
             raise ValueError(
                 "ventilation level must be between 0 and 4 or sensor-controlled"
@@ -184,13 +189,20 @@ class ConnectBoxClient:
                 raise ValueError(
                     "this ventilation unit does not report a sensor board"
                 )
+            active_mode = run_state.temperature_mode
+            mode = active_mode if temperature_mode is None else temperature_mode
+            if temperature_mode is not None and mode not in {
+                value.temperature_mode for value in room.ventilation
+            }:
+                raise ValueError("the room has no value for this situation")
             session = self._connected_session()
             session.request(
                 OperationType.SET_ROOM_VALUE_REQUEST,
                 OperationType.SET_ROOM_VALUE_CONFIRM,
-                encode_room_level(room, run_state.temperature_mode, level),
+                encode_room_level(room, mode, level),
             )
-            self._wait_for_room_level(room_id, level)
+            if mode == active_mode:
+                self._wait_for_room_level(room_id, level)
             return self.read_snapshot(refresh_properties=False)
         except (ProtocolError, TransportError):
             self.close()
