@@ -149,6 +149,8 @@ class Room:
     ventilation: tuple[VentilationValue, ...]
     devices: tuple[AttachedDevice, ...]
     raw: bytes = field(default=b"", repr=False, compare=False)
+    temporary_until: int | None = None
+    """Unix time at which a temporary change (e.g. on the unit) ends."""
 
     def level_for_mode(self, temperature_mode: int) -> int | None:
         """Return the configured level for the active temperature mode."""

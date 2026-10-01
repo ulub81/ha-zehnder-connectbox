@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -24,7 +25,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import ZehnderConnectBoxConfigEntry
 from .const import CONF_GATEWAY_UUID
 from .entity import ConnectBoxDeviceEntity, supported_device_ids
-from .models import AttachedDevice
+from .models import AttachedDevice, Room
 from .profiles import (
     EXHAUST_FAN_SPEED,
     EXTRACT_AIR_SENSOR_STATUS,
@@ -46,9 +47,20 @@ from .profiles import (
 class ConnectBoxSensorDescription(SensorEntityDescription):
     """Describe how a device value is obtained."""
 
-    value_fn: Callable[[AttachedDevice], int | float | None]
+    value_fn: Callable[[AttachedDevice], int | float | datetime | None]
     # Create the entity only once the unit reports the value (sensor board).
     exists_fn: Callable[[AttachedDevice], bool] | None = None
+    # Read the value from the unit's room instead of the unit itself.
+    room_value_fn: Callable[[Room], int | float | datetime | None] | None = None
+    # Keep the entity available while no value is reported (state unknown).
+    available_without_value: bool = False
+
+
+def _temporary_until(room: Room) -> datetime | None:
+    """Return the end of a temporary change of the room, if one is active."""
+    if not room.temporary_until:
+        return None
+    return datetime.fromtimestamp(room.temporary_until, UTC)
 
 
 SENSORS = (
@@ -93,6 +105,14 @@ SENSORS = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda device: board_reading(device, SENSOR_TYPE_CO2),
         exists_fn=lambda device: board_reading(device, SENSOR_TYPE_CO2) is not None,
+    ),
+    ConnectBoxSensorDescription(
+        key="temporary_until",
+        translation_key="temporary_until",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda device: None,
+        room_value_fn=_temporary_until,
+        available_without_value=True,
     ),
     ConnectBoxSensorDescription(
         key="exhaust_fan_speed",
@@ -202,12 +222,21 @@ class ConnectBoxSensor(ConnectBoxDeviceEntity, SensorEntity):
         self._attr_unique_id = f"{gateway_uuid}_{device_id}_{description.key}"
 
     @property
-    def native_value(self) -> int | float | None:
+    def native_value(self) -> int | float | datetime | None:
         """Return the decoded telemetry value."""
         data = self.device_data
-        return self.entity_description.value_fn(data[1]) if data else None
+        if data is None:
+            return None
+        room, device = data
+        if self.entity_description.room_value_fn is not None:
+            return self.entity_description.room_value_fn(room)
+        return self.entity_description.value_fn(device)
 
     @property
     def available(self) -> bool:
         """Hide stale values when optional telemetry is not reported."""
-        return super().available and self.native_value is not None
+        if not super().available:
+            return False
+        if self.entity_description.available_without_value:
+            return True
+        return self.native_value is not None

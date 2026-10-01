@@ -238,6 +238,8 @@ def _decode_room(message: bytes) -> Room:
         ),
         devices=tuple(_decode_device(value) for value in bytes_values(fields, 8)),
         raw=message,
+        # The gateway may encode zero when no temporary change is active.
+        temporary_until=uint_value(fields, 61) or None,
     )
 
 
