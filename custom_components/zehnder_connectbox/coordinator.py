@@ -13,6 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .client import ConnectBoxClient
 from .const import (
@@ -25,14 +26,18 @@ from .const import (
 )
 from .models import GatewaySnapshot, Room, RunMode, RunState
 from .profiles import (
+    CANDIDATE_WRITE_LOG_SIZE,
     CAPTURE_PROPERTY_GROUPS,
     CAPTURE_TIME_BUDGET,
     FILTER_RUNTIME,
+    SUPPLY_ONLY_CANDIDATE,
     format_version,
     product_name,
+    supply_only_candidate_key,
     supports_sensor_status,
 )
 from .protocol import ProtocolError
+from .session import GatewayResponseError
 from .transport import CertificateMismatchError, TransportError
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,6 +67,9 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         self._failures = 0
         self._last_non_off_mode = RunMode.MANUAL
         self._io_lock = asyncio.Lock()
+        # Temporary test build: outcome of the supply-only candidate writes,
+        # shown in the diagnostics capture.
+        self.candidate_writes: list[dict[str, object]] = []
 
     async def _async_update_data(self) -> GatewaySnapshot:
         now = time.monotonic()
@@ -161,6 +169,39 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
             )
         self._last_property_refresh = time.monotonic()
         self._last_filter_property_refresh = self._last_property_refresh
+        self._accept_command_snapshot(snapshot)
+
+    async def async_write_supply_only_candidate(
+        self, device_id: int, value: int
+    ) -> None:
+        """Temporary test build: write the supply-only candidate and log it."""
+        data = self.data.find_device(device_id) if self.data is not None else None
+        key = supply_only_candidate_key(data[1]) if data is not None else None
+        if key is None:
+            raise ProtocolError("the test property is not available for this device")
+
+        record: dict[str, object] = {
+            "at": dt_util.utcnow().isoformat(timespec="seconds"),
+            "device": device_id,
+            "property": ".".join(str(part) for part in SUPPLY_ONLY_CANDIDATE),
+            "value": value,
+            "result": "pending",
+        }
+        self.candidate_writes.append(record)
+        del self.candidate_writes[:-CANDIDATE_WRITE_LOG_SIZE]
+        try:
+            async with self._io_lock:
+                snapshot = await self.hass.async_add_executor_job(
+                    self.client.write_supply_only_candidate, device_id, key, value
+                )
+        except GatewayResponseError as err:
+            record["result"] = f"rejected with result {err.result}"
+            raise
+        except Exception as err:
+            record["result"] = f"failed: {type(err).__name__}"
+            raise
+        record["result"] = "confirmed"
+        self._last_property_refresh = time.monotonic()
         self._accept_command_snapshot(snapshot)
 
     async def async_capture(

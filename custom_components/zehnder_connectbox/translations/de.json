@@ -66,6 +66,12 @@
     "button": {
       "reset_filter_timer": {
         "name": "Filtertimer zurücksetzen"
+      },
+      "supply_only_candidate_0": {
+        "name": "Test: 38.0.5 = 0 (Fortluftlüfter aus)"
+      },
+      "supply_only_candidate_1": {
+        "name": "Test: 38.0.5 = 1 (Fortluftlüfter an)"
       }
     },
     "binary_sensor": {

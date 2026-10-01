@@ -26,6 +26,8 @@ from .models import (
     VersionInfo,
 )
 from .profiles import (
+    SUPPLY_ONLY_CANDIDATE,
+    SUPPLY_ONLY_CANDIDATE_VALUES,
     PropertySpec,
     is_supported,
     optional_property_specs_for_device,
@@ -342,6 +344,50 @@ class ConnectBoxClient:
                     (device_id, property_key.value_identity): b"\x00\x00"
                 },
             )
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    def write_supply_only_candidate(
+        self, device_id: int, property_key: PropertyKey, value: int
+    ) -> GatewaySnapshot:
+        """Temporary test build: write the supply-only candidate once.
+
+        Only the candidate property, the values 0 and 1, and ComfoSpot 50
+        units are accepted. The gateway's confirmation is the result; how the
+        unit reacts shows in the next diagnostics download.
+        """
+        if (
+            property_key.value_identity != SUPPLY_ONLY_CANDIDATE
+            or value not in SUPPLY_ONLY_CANDIDATE_VALUES
+        ):
+            raise ValueError("unexpected test write")
+        try:
+            device = next(
+                (
+                    item
+                    for room in self._read_rooms()
+                    for item in room.devices
+                    if item.device_id == device_id
+                ),
+                None,
+            )
+            if device is None:
+                raise ProtocolError("device is no longer available")
+            if (
+                not is_supported(device)
+                or device.product_variant != PRODUCT_VARIANT_COMFOSPOT_50
+            ):
+                raise ProtocolError("the test write is limited to ComfoSpot 50 units")
+            if property_key.product_type != device.product_type:
+                raise ProtocolError("test property does not match the device")
+
+            self._connected_session().request(
+                OperationType.SET_DEVICE_PROPERTIES_REQUEST,
+                OperationType.SET_DEVICE_PROPERTIES_CONFIRM,
+                encode_property_update(device_id, property_key, bytes((value,))),
+            )
+            return self.read_snapshot(refresh_properties=True)
         except (ProtocolError, TransportError):
             self.close()
             raise
