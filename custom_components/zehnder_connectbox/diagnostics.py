@@ -373,7 +373,5 @@ async def async_get_config_entry_diagnostics(
         )
     except ProtobufDecodeError:
         capture["fields"] = {"status": "failed", "error": "ProtobufDecodeError"}
-    # Temporary test build: outcome of the supply-only candidate writes.
-    capture["candidate_writes"] = list(getattr(coordinator, "candidate_writes", ()))
     result["capture"] = capture
     return result
