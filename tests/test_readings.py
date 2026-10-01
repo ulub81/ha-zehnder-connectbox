@@ -88,7 +88,7 @@ def room_message(
 
 
 def snapshot(message: bytes, run_mode=RunMode.AUTOMATIC) -> GatewaySnapshot:
-    run_state = RunState(int(run_mode), 0, False, 0, False, ())
+    run_state = RunState(int(run_mode), 0, False, 0, False, None, ())
     return GatewaySnapshot(
         VersionInfo(None, None, None, None, None), run_state, decode_rooms(message)
     )
@@ -201,7 +201,7 @@ def make_client(room_reads):
     session.request = lambda *args, **kwargs: (
         session.requests.append(args[0]) or SimpleNamespace(body=b"")
     )
-    client._read_run_state = lambda: RunState(1, 0, False, 0, False, ())
+    client._read_run_state = lambda: RunState(1, 0, False, 0, False, None, ())
     client._read_rooms = read_rooms
     client._connected_session = lambda: session
     client.read_snapshot = lambda **_kwargs: "snapshot"

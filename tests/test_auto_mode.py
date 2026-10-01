@@ -108,6 +108,7 @@ def make_snapshot(level: int, *, run_mode=RunMode.MANUAL, asleep=1, device=BOARD
         standby=None,
         standby_mode=None,
         summer_ventilation=None,
+        summer_ventilation_end=None,
         errors=(),
     )
     version = VersionInfo(None, None, None, None, None)

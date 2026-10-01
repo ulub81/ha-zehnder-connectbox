@@ -19,11 +19,13 @@ from custom_components.zehnder_connectbox import (  # noqa: E402
     diagnostics,
     select,
     sensor,
+    switch,
 )
 from custom_components.zehnder_connectbox import client as client_mod  # noqa: E402
 from custom_components.zehnder_connectbox.models import (  # noqa: E402
     GatewaySnapshot,
     RunState,
+    SummerVentilationSettings,
     VersionInfo,
 )
 from custom_components.zehnder_connectbox.protobuf import (  # noqa: E402
@@ -52,8 +54,11 @@ def room_message(
     level_zero=1,
     readings=((1, 239), (2, 51), (3, 597)),
     variant=1,
+    summer_capable=1,
 ):
     unit = [encode_uint(1, device_id), encode_uint(5, 30), encode_uint(7, 67)]
+    if summer_capable is not None:
+        unit.append(encode_uint(19, summer_capable))
     for sensor_type, value in readings:
         unit.append(encode_bytes(8, encode_uint(1, sensor_type) + encode_uint(2, value)))
     unit += [encode_uint(20, level_zero), encode_uint(110, variant)]
@@ -66,10 +71,14 @@ def room_message(
     return encode_bytes(1, b"".join(room))
 
 
-def snapshot(*messages, summer=False, temperature_mode=0):
+def snapshot(
+    *messages, summer=False, temperature_mode=0, summer_end=None, settings=None
+):
     rooms = tuple(room for message in messages for room in decode_rooms(message))
-    run_state = RunState(1, temperature_mode, False, 0, summer, ())
-    return GatewaySnapshot(VersionInfo(None, None, None, None, None), run_state, rooms)
+    run_state = RunState(1, temperature_mode, False, 0, summer, summer_end, ())
+    return GatewaySnapshot(
+        VersionInfo(None, None, None, None, None), run_state, rooms, settings
+    )
 
 
 class FakeCoordinator:
@@ -108,15 +117,59 @@ def test_decode_temporary_change_end():
 # --- summer ventilation -----------------------------------------------------------
 
 
-@pytest.mark.parametrize(("summer", "state", "available"), [(True, True, True), (False, False, True), (None, None, False)])
-def test_summer_ventilation_binary_sensor(summer, state, available):
-    coordinator = FakeCoordinator(snapshot(room_message(), summer=summer))
+SETTINGS = SummerVentilationSettings(enabled=True, duration_hours=6)
+
+
+def summer_switches(coordinator):
+    return [
+        entity
+        for entity in setup_platform(switch, coordinator)
+        if isinstance(entity, switch.ConnectBoxSummerVentilationSwitch)
+    ]
+
+
+def test_no_separate_summer_binary_sensor():
+    coordinator = FakeCoordinator(snapshot(room_message(), summer=True, settings=SETTINGS))
     entities = setup_platform(binary_sensor, coordinator)
-    summer_entity = next(
-        entity for entity in entities if isinstance(entity, binary_sensor.ConnectBoxSummerVentilation)
+    assert not any(
+        entity.translation_key == "summer_ventilation" for entity in entities
     )
-    assert summer_entity.is_on is state
-    assert summer_entity.available is available
+    assert not hasattr(binary_sensor, "ConnectBoxSummerVentilation")
+
+
+@pytest.mark.parametrize(("summer", "state"), [(True, True), (False, False)])
+def test_summer_switch_shows_running_state_and_end(summer, state):
+    end = UNTIL if summer else None
+    coordinator = FakeCoordinator(
+        snapshot(room_message(), summer=summer, summer_end=end, settings=SETTINGS)
+    )
+    [entity] = summer_switches(coordinator)
+    assert entity.is_on is state
+    assert entity.available is True
+    attributes = entity.extra_state_attributes
+    assert attributes["duration_hours"] == 6
+    assert attributes["ends_at"] == ("2026-10-01T19:00:00+00:00" if summer else None)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"settings": None}, room_message()),
+        ({"settings": SETTINGS}, room_message(summer_capable=None)),
+        ({"settings": SETTINGS}, room_message(variant=2)),
+    ],
+)
+def test_summer_switch_needs_settings_and_capable_units(kwargs, message):
+    coordinator = FakeCoordinator(snapshot(message, **kwargs))
+    assert summer_switches(coordinator) == []
+
+
+def test_summer_switch_unavailable_during_temporary_situation():
+    coordinator = FakeCoordinator(
+        snapshot(room_message(), temperature_mode=4, settings=SETTINGS)
+    )
+    [entity] = summer_switches(coordinator)
+    assert entity.available is False
 
 
 # --- situation levels -------------------------------------------------------------
@@ -189,7 +242,7 @@ def make_client(message):
         session.bodies.append(body) or SimpleNamespace(body=b"")
     )
     reads = []
-    client._read_run_state = lambda: RunState(1, 0, False, 0, False, ())
+    client._read_run_state = lambda: RunState(1, 0, False, 0, False, None, ())
     client._read_rooms = lambda: (reads.append(1) or rooms)
     client._connected_session = lambda: session
     client.read_snapshot = lambda **_kw: "snapshot"
@@ -250,6 +303,6 @@ def test_diagnostics_report_summer_and_temporary_change():
     coordinator = FakeCoordinator(snapshot(room_message(until=UNTIL), summer=True))
     entry = SimpleNamespace(runtime_data=coordinator, version=1)
     result = asyncio.run(diagnostics.async_get_config_entry_diagnostics(None, entry))
-    assert result["gateway"]["summer_ventilation"] is True
+    assert result["gateway"]["summer_ventilation_active"] is True
     assert result["attached_devices"][0]["temporary_change_active"] is True
     assert "Wohnzimmer" not in json_bytes(result).decode()

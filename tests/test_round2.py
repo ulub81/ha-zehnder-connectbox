@@ -77,7 +77,7 @@ def room_message(*, room_id=1, boost_until=None, boost_duration=15, until=None):
 
 
 def run_state(run_mode=1, temperature_mode=0):
-    return RunState(run_mode, temperature_mode, False, 0, False, ())
+    return RunState(run_mode, temperature_mode, False, 0, False, None, ())
 
 
 def snapshot(message, *, run_mode=1, temperature_mode=0):
