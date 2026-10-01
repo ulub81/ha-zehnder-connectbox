@@ -72,25 +72,6 @@ SENSOR_STATUS_SPECS = (
     CO2_SENSOR_STATUS,
 )
 
-# Temporary, read-only discovery of the sensor-board measurement properties
-# (humidity, CO2, VOC). Each group is (class, instance, property IDs). The
-# temperature class 25 is included as a reference for the known layout
-# (value in property 1, status in property 4). Remove once the IDs are known.
-PROPERTY_SCAN_GROUPS = (
-    (25, 0, tuple(range(1, 9))),
-    (26, 0, tuple(range(1, 17))),
-    (26, 1, tuple(range(1, 9))),
-    (39, 0, tuple(range(1, 17))),
-    (39, 1, tuple(range(1, 9))),
-    (27, 0, tuple(range(1, 9))),
-    (40, 0, tuple(range(1, 9))),
-)
-# Fan-unit properties, read for every ComfoSpot 50 to find where a level
-# changed on the unit's own control panel is reported.
-FAN_SCAN_GROUPS = ((38, 0, tuple(range(1, 21))),)
-PROPERTY_SCAN_MAX_DEVICES = 1
-PROPERTY_SCAN_TIME_BUDGET = 45.0
-
 
 def supports_sensor_status(device: AttachedDevice) -> bool:
     """Limit the status interpretation to the physically checked profile."""
