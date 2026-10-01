@@ -59,7 +59,7 @@ async def async_setup_entry(
     entry: ZehnderConnectBoxConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up the run-mode select and the per-situation level selects."""
+    """Set up the run-mode and situation selects and the level selects."""
     coordinator = entry.runtime_data
     async_add_entities(
         [ConnectBoxOperatingMode(coordinator), ConnectBoxSituation(coordinator)]
