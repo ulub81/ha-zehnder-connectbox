@@ -27,6 +27,8 @@ from .models import (
     VersionInfo,
 )
 from .profiles import (
+    ROOM_STATE_FAN_CLASS,
+    ROOM_STATE_TEST_VALUES,
     SUPPLY_ONLY_CANDIDATE,
     SUPPLY_ONLY_CANDIDATE_VALUES,
     PropertySpec,
@@ -50,8 +52,10 @@ from .protocol import (
     encode_property_request,
     encode_property_update,
     encode_room_level,
+    encode_room_state_test,
     encode_run_state,
     encode_summer_ventilation_settings,
+    room_state_record,
 )
 from .session import ConnectBoxSession, GatewayResponseError
 from .transport import ConnectBoxTransport, TransportError
@@ -60,6 +64,9 @@ PAIRING_NICKNAME = "Home Assistant"
 PROPERTY_SETTLE_TIMEOUT = 5.0
 LEVEL_SETTLE_TIMEOUT = 5.0
 LEVEL_SETTLE_POLL_INTERVAL = 0.5
+# Temporary test build: how long to wait for the written room record.
+ROOM_STATE_SETTLE_TIMEOUT = 5.0
+ROOM_STATE_POLL_INTERVAL = 1.0
 SUMMER_SETTLE_TIMEOUT = 8.0
 SUMMER_SETTLE_POLL_INTERVAL = 0.5
 COMMAND_SETTLE_TIMEOUT = 10.0
@@ -495,9 +502,9 @@ class ConnectBoxClient:
     ) -> GatewaySnapshot:
         """Temporary test build: write the supply-only candidate once.
 
-        Only the candidate property, the values 0 and 1, and ComfoSpot 50
-        units are accepted. The gateway's confirmation is the result; how the
-        unit reacts shows in the next diagnostics download.
+        Only the candidate property, the value 1, and ComfoSpot 50 units are
+        accepted. The gateway's confirmation is the result; how the unit
+        reacts shows in the next diagnostics download.
         """
         if (
             property_key.value_identity != SUPPLY_ONLY_CANDIDATE
@@ -529,6 +536,53 @@ class ConnectBoxClient:
                 OperationType.SET_DEVICE_PROPERTIES_CONFIRM,
                 encode_property_update(device_id, property_key, bytes((value,))),
             )
+            return self.read_snapshot(refresh_properties=True)
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    def write_room_state_test(
+        self, room_id: int, class_id: int, first_byte: int
+    ) -> GatewaySnapshot:
+        """Temporary test build: write a room back with one record byte changed.
+
+        Only the fan record, the values 0 and 1, and rooms with a ComfoSpot 50
+        are accepted. After the gateway's confirmation, the room is read until
+        the record shows the written byte or a few seconds have passed; the
+        returned snapshot shows what the gateway kept.
+        """
+        if (
+            class_id != ROOM_STATE_FAN_CLASS
+            or first_byte not in ROOM_STATE_TEST_VALUES
+        ):
+            raise ValueError("unexpected test write")
+
+        def find(rooms: tuple[Room, ...]) -> Room | None:
+            return next((item for item in rooms if item.room_id == room_id), None)
+
+        try:
+            room = find(self._read_rooms())
+            if room is None:
+                raise ProtocolError("room is no longer available")
+            if not any(
+                is_supported(device)
+                and device.product_variant == PRODUCT_VARIANT_COMFOSPOT_50
+                for device in room.devices
+            ):
+                raise ProtocolError("the test write is limited to ComfoSpot 50 rooms")
+
+            self._connected_session().request(
+                OperationType.SET_ROOM_REQUEST,
+                OperationType.SET_ROOM_CONFIRM,
+                encode_room_state_test(room, class_id, first_byte),
+            )
+            deadline = time.monotonic() + ROOM_STATE_SETTLE_TIMEOUT
+            while True:
+                record = room_state_record(find(self._read_rooms()), class_id)
+                stored = bool(record) and record[0] == first_byte
+                if stored or time.monotonic() >= deadline:
+                    break
+                time.sleep(ROOM_STATE_POLL_INTERVAL)
             return self.read_snapshot(refresh_properties=True)
         except (ProtocolError, TransportError):
             self.close()
