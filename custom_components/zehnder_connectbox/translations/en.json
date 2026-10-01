@@ -66,18 +66,12 @@
     "button": {
       "reset_filter_timer": {
         "name": "Reset filter timer"
-      },
-      "supply_only_candidate_1": {
-        "name": "Test: 38.0.5 = 1 (exhaust fan on)"
-      },
-      "room_supply_only_test_1": {
-        "name": "Test: room value supply-only on (f101)"
-      },
-      "room_supply_only_test_0": {
-        "name": "Test: room value supply-only off (f101)"
       }
     },
     "binary_sensor": {
+      "supply_only": {
+        "name": "Supply-only operation"
+      },
       "fault": {
         "name": "Fault"
       },

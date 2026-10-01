@@ -20,7 +20,6 @@ from .models import (
 )
 from .protobuf import (
     Field,
-    ProtobufDecodeError,
     WireType,
     bytes_value,
     bytes_values,
@@ -432,78 +431,6 @@ def encode_filter_reset_room(room: Room, device_id: int) -> bytes:
 
     if not device_found:
         raise ProtocolError("device is no longer attached to this room")
-    return encode_bytes(1, bytes(room_value))
-
-
-def _room_record_class(entry: bytes) -> int | None:
-    """Temporary test build: the class of a room field-101 record."""
-    try:
-        key = decode_fields(bytes_value(decode_fields(entry), 1) or b"")
-    except ProtobufDecodeError:
-        return None
-    return uint_value(key, 1)
-
-
-def room_state_record(room: Room | None, class_id: int) -> bytes | None:
-    """Temporary test build: a room's field-101 record value for a class."""
-    if room is None or not room.raw:
-        return None
-    try:
-        for entry in bytes_values(decode_fields(room.raw), 101):
-            if _room_record_class(entry) == class_id:
-                return bytes_value(decode_fields(entry), 2)
-    except ProtobufDecodeError:
-        return None
-    return None
-
-
-def encode_room_state_test(room: Room, class_id: int, first_byte: int) -> bytes:
-    """Temporary test build: write a room back with one record byte changed.
-
-    The room is sent as read, without the device fields 30, 31, and 41 that
-    the official client leaves out of a room write, and without a filter
-    acknowledgement. Only the first byte of the class's field-101 record
-    changes.
-    """
-    if not 0 <= first_byte <= 255:
-        raise ValueError("record byte must fit in one byte")
-    if not room.raw:
-        raise ProtocolError("room does not contain its original gateway data")
-
-    changed = False
-    room_value = bytearray()
-    for field in decode_fields(room.raw):
-        if field.number == 8 and field.wire_type is WireType.BYTES:
-            device_fields = decode_fields(bytes(field.value))
-            writable_fields = tuple(
-                item for item in device_fields if item.number not in (30, 31, 41)
-            )
-            room_value.extend(encode_bytes(8, _encode_fields(writable_fields)))
-            continue
-        if (
-            not changed
-            and field.number == 101
-            and field.wire_type is WireType.BYTES
-            and _room_record_class(bytes(field.value)) == class_id
-        ):
-            entry_value = bytearray()
-            for item in decode_fields(bytes(field.value)):
-                is_value = item.number == 2 and item.wire_type is WireType.BYTES
-                if not changed and is_value:
-                    value = bytes(item.value)
-                    if not value:
-                        raise ProtocolError("the room record has no value")
-                    new_value = bytes((first_byte,)) + value[1:]
-                    entry_value.extend(encode_bytes(2, new_value))
-                    changed = True
-                else:
-                    entry_value.extend(_encode_field(item))
-            room_value.extend(encode_bytes(101, bytes(entry_value)))
-            continue
-        room_value.extend(_encode_field(field))
-
-    if not changed:
-        raise ProtocolError("the room has no record for this class")
     return encode_bytes(1, bytes(room_value))
 
 
