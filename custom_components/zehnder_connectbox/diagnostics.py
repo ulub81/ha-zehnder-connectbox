@@ -89,9 +89,16 @@ async def async_get_config_entry_diagnostics(
                 "ventilation_level": room.level_for_mode(
                     snapshot.run_state.temperature_mode
                 ),
+                "current_level": room.current_level(
+                    snapshot.run_state.temperature_mode
+                ),
                 "ventilation_values": {
                     _temperature_mode_name(value.temperature_mode): value.level
                     for value in room.ventilation
+                },
+                "sensor_readings": {
+                    str(sensor_type): value
+                    for sensor_type, value in device.sensor_readings
                 },
                 "sensor_board_reported": has_sensor_board(device),
                 "sensor_mode_supported": supports_sensor_mode(room, device),

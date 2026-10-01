@@ -15,6 +15,14 @@ project follows [Semantic Versioning](https://semver.org/).
   fan state.
 - Include the per-situation ventilation values and sensor-mode availability in
   the diagnostics.
+- Show the relative humidity and CO2 concentration measured by the sensor
+  board of ComfoSpot 50 units that report them.
+
+### Changed
+
+- Show the level a unit currently runs at, so a level changed on the unit's
+  own control panel appears in Home Assistant. After a level is set from Home
+  Assistant, wait briefly until the unit reports it.
 
 ## [0.2.1-beta.2] - 2026-10-01 (pre-release)
 
