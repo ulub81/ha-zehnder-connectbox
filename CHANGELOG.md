@@ -7,14 +7,6 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Offer an `auto` ventilation preset that selects sensor-controlled operation
-  for ComfoSpot 50 units with a sensor board. It is offered only when the unit
-  reports an available humidity or CO2 sensor, or when its room already uses
-  sensor-controlled operation in one of its situations.
-- Show sensor-controlled operation as the `auto` preset instead of an unknown
-  fan state.
-- Include the per-situation ventilation values and sensor-mode availability in
-  the diagnostics.
 - Show the relative humidity and CO2 concentration measured by the sensor
   board of ComfoSpot 50 units that report them.
 
@@ -23,6 +15,19 @@ project follows [Semantic Versioning](https://semver.org/).
 - Show the level a unit currently runs at, so a level changed on the unit's
   own control panel appears in Home Assistant. After a level is set from Home
   Assistant, wait briefly until the unit reports it.
+
+## [0.3.0-beta.1] - 2026-10-01 (pre-release)
+
+### Added
+
+- Offer an `auto` ventilation preset that selects sensor-controlled operation
+  for ComfoSpot 50 units with a sensor board. It is offered only when the unit
+  reports an available humidity or CO2 sensor, or when its room already uses
+  sensor-controlled operation in one of its situations.
+- Show sensor-controlled operation as the `auto` preset instead of an unknown
+  fan state.
+- Include the per-situation ventilation values and sensor-mode availability in
+  the diagnostics.
 
 ## [0.2.1-beta.2] - 2026-10-01 (pre-release)
 
@@ -90,7 +95,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - ComfoSpot 50 filter-timer reset button with gateway acknowledgements, state
   readback, and documented dashboard confirmation.
 
-[Unreleased]: https://github.com/andyblenk/ha-zehnder-connectbox/compare/v0.2.1-beta.2...HEAD
+[Unreleased]: https://github.com/andyblenk/ha-zehnder-connectbox/compare/v0.3.0-beta.1...HEAD
+[0.3.0-beta.1]: https://github.com/andyblenk/ha-zehnder-connectbox/releases/tag/v0.3.0-beta.1
 [0.2.1-beta.2]: https://github.com/andyblenk/ha-zehnder-connectbox/releases/tag/v0.2.1-beta.2
 [0.2.1-beta.1]: https://github.com/andyblenk/ha-zehnder-connectbox/releases/tag/v0.2.1-beta.1
 [0.2.0]: https://github.com/andyblenk/ha-zehnder-connectbox/releases/tag/v0.2.0

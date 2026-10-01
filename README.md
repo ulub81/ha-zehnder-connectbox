@@ -113,7 +113,15 @@ controls. Levels 1–4 can be selected directly as named presets or set as
 25–100% fan speed. It shows the level the unit currently runs at, including a
 level changed on the unit's own control panel.
 
+Without an optional sensor board, the available presets are Level 1 through
+Level 4:
+
 <img src="docs/images/ventilation-dialog.png" alt="Ventilation level control with presets in Home Assistant" width="430">
+
+When the unit reports an available humidity or CO2 sensor, the additional
+**Auto (sensor)** preset is shown:
+
+<img src="docs/images/ventilation-dialog-with-sensor.png" alt="Ventilation control with the Auto sensor preset in Home Assistant" width="430">
 
 Firmware and valid hardware versions are displayed in the ventilation unit's
 device information. Optional values are shown only when the connected product
