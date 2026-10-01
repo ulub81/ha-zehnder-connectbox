@@ -228,14 +228,19 @@
       },
       "boost_until": {
         "name": "Stoßlüftung bis"
+      },
+      "summer_ventilation_role": {
+        "name": "Rolle Sommerlüftung",
+        "state": {
+          "supply_and_exhaust": "Zu- und Abluft",
+          "supply": "Zuluft",
+          "exhaust": "Abluft"
+        }
       }
     },
     "switch": {
       "central_ventilation": {
         "name": "Zentrale Lüftung"
-      },
-      "boost": {
-        "name": "Stoßlüftung"
       }
     }
   }
