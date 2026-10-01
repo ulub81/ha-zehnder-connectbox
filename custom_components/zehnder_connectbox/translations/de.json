@@ -180,6 +180,16 @@
           "level_4": "Stufe 4",
           "auto": "Automatik (Sensor)"
         }
+      },
+      "situation": {
+        "name": "Situation",
+        "state": {
+          "awake": "Daheim",
+          "asleep": "Schlafen",
+          "away": "Abwesend",
+          "antifreeze": "Frostschutz",
+          "override": "Vorübergehend geändert"
+        }
       }
     },
     "sensor": {
@@ -215,11 +225,17 @@
       },
       "temporary_until": {
         "name": "Temporäre Änderung bis"
+      },
+      "boost_until": {
+        "name": "Stoßlüftung bis"
       }
     },
     "switch": {
       "central_ventilation": {
         "name": "Zentrale Lüftung"
+      },
+      "boost": {
+        "name": "Stoßlüftung"
       }
     }
   }

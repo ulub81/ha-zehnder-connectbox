@@ -16,6 +16,9 @@ project follows [Semantic Versioning](https://semver.org/).
   away, frost protection) from Home Assistant.
 - Show when a temporary change of a room ends, such as a level changed on the
   unit's control panel.
+- Show the active situation and select the situation at home or away, which
+  switches to the manual mode.
+- Start and end a room's boost and show when a running boost ends.
 
 ### Changed
 

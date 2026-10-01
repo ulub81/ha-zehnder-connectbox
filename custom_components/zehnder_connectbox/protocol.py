@@ -35,6 +35,18 @@ MAX_FRAME_PAYLOAD = 8191
 MAX_OPERATION_SIZE = 1023
 FRAME_HEADER_SIZE = 34
 
+# Room fields observed while the official app started and stopped a boost and
+# after a level was changed on a unit's control panel.
+ROOM_BOOST_UNTIL = 18
+"""Unix time at which an active boost ends; absent without a boost."""
+ROOM_BOOST_DURATION = 22
+"""Configured boost duration in minutes (the app offers 15 to 120)."""
+ROOM_TEMPORARY_UNTIL = 61
+"""Unix time of the next schedule change that ends a temporary change."""
+# Read-only alarm and runtime values of an attached device. The official
+# client does not echo them in a room write.
+READ_ONLY_DEVICE_FIELDS = (30, 31, 41)
+
 
 class ProtocolError(ConnectionError):
     """Raised for invalid or unexpected gateway data."""
@@ -241,7 +253,9 @@ def _decode_room(message: bytes) -> Room:
         devices=tuple(_decode_device(value) for value in bytes_values(fields, 8)),
         raw=message,
         # The gateway may encode zero when no temporary change is active.
-        temporary_until=uint_value(fields, 61) or None,
+        temporary_until=uint_value(fields, ROOM_TEMPORARY_UNTIL) or None,
+        boost_until=uint_value(fields, ROOM_BOOST_UNTIL) or None,
+        boost_duration=uint_value(fields, ROOM_BOOST_DURATION),
     )
 
 
@@ -366,13 +380,9 @@ def encode_filter_reset_room(room: Room, device_id: int) -> bytes:
         is_target = current_device_id == device_id
         device_found |= is_target
 
-        # The official client does not echo these read-only alarm/runtime
-        # values in a room write. A present false filter flag is the supported
-        # acknowledgement for the selected unit.
-        writable_fields = tuple(
-            item for item in device_fields if item.number not in (30, 31, 41)
-        )
-        device_value = bytearray(_encode_fields(writable_fields))
+        # A present false filter flag is the supported acknowledgement for the
+        # selected unit.
+        device_value = bytearray(_writable_device(device_fields))
         if is_target:
             device_value.extend(encode_uint(31, 0))
         room_value.extend(encode_bytes(8, bytes(device_value)))
@@ -380,6 +390,34 @@ def encode_filter_reset_room(room: Room, device_id: int) -> bytes:
     if not device_found:
         raise ProtocolError("device is no longer attached to this room")
     return encode_bytes(1, bytes(room_value))
+
+
+def encode_room_boost(room: Room, boost_until: int | None) -> bytes:
+    """Build a room update that starts a boost until a time, or ends it."""
+    if not room.raw:
+        raise ProtocolError("room does not contain its original gateway data")
+
+    room_value = bytearray()
+    for field in decode_fields(room.raw):
+        if field.number == ROOM_BOOST_UNTIL:
+            continue
+        if field.number == 8 and field.wire_type is WireType.BYTES:
+            device_fields = decode_fields(bytes(field.value))
+            room_value.extend(encode_bytes(8, _writable_device(device_fields)))
+            continue
+        room_value.extend(_encode_field(field))
+    if boost_until is not None:
+        room_value.extend(encode_uint(ROOM_BOOST_UNTIL, boost_until))
+    return encode_bytes(1, bytes(room_value))
+
+
+def _writable_device(device_fields: tuple[Field, ...]) -> bytes:
+    """Re-encode a device without its read-only alarm and runtime values."""
+    return _encode_fields(
+        tuple(
+            item for item in device_fields if item.number not in READ_ONLY_DEVICE_FIELDS
+        )
+    )
 
 
 def encode_property_update(device_id: int, key: PropertyKey, value: bytes) -> bytes:

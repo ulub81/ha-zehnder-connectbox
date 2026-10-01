@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import time
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -186,6 +187,8 @@ async def async_get_config_entry_diagnostics(
                     snapshot.run_state.temperature_mode
                 ),
                 "temporary_change_active": room.temporary_until is not None,
+                "boost_active": room.boost_active(time.time()),
+                "boost_duration": room.boost_duration,
                 "ventilation_values": {
                     _temperature_mode_name(value.temperature_mode): value.level
                     for value in room.ventilation

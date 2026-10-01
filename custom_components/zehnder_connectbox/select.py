@@ -1,4 +1,4 @@
-"""Operating-mode and per-situation level selects for Zehnder ConnectBox."""
+"""Operating-mode, situation and per-situation level selects."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import ClassVar
 from homeassistant.components.select import SelectEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import ZehnderConnectBoxConfigEntry
@@ -40,6 +41,18 @@ LEVEL_TO_OPTION = {
 }
 OPTION_TO_LEVEL = {option: level for level, option in LEVEL_TO_OPTION.items()}
 
+# Active situation of the system. Only the situations of the app's manual mode
+# can be selected; the others are shown while a schedule or mode applies them.
+SITUATION_TO_OPTION = {
+    TemperatureMode.AWAKE: "awake",
+    TemperatureMode.ASLEEP: "asleep",
+    TemperatureMode.AWAY: "away",
+    TemperatureMode.ANTIFREEZE: "antifreeze",
+    TemperatureMode.OVERRIDE: "override",
+}
+OPTION_TO_SITUATION = {option: mode for mode, option in SITUATION_TO_OPTION.items()}
+SELECTABLE_SITUATIONS = ("awake", "away")
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -48,7 +61,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up the run-mode select and the per-situation level selects."""
     coordinator = entry.runtime_data
-    async_add_entities([ConnectBoxOperatingMode(coordinator)])
+    async_add_entities(
+        [ConnectBoxOperatingMode(coordinator), ConnectBoxSituation(coordinator)]
+    )
     known: set[tuple[int, int]] = set()
 
     @callback
@@ -100,6 +115,51 @@ class ConnectBoxOperatingMode(ConnectBoxGatewayEntity, SelectEntity):
     async def async_select_option(self, option: str) -> None:
         """Set a supported operating mode."""
         await self.coordinator.async_set_mode(OPTION_TO_MODE[option])
+
+
+class ConnectBoxSituation(ConnectBoxGatewayEntity, SelectEntity):
+    """Show the active situation and select one of the manual mode."""
+
+    _attr_translation_key = "situation"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        gateway_uuid = coordinator.entry.data[CONF_GATEWAY_UUID]
+        self._attr_unique_id = f"{gateway_uuid}_situation"
+
+    @property
+    def options(self) -> list[str]:
+        """Offer the manual mode's situations and the currently active one."""
+        options = list(SELECTABLE_SITUATIONS)
+        current = self.current_option
+        if current is not None and current not in options:
+            options.append(current)
+        return options
+
+    @property
+    def current_option(self) -> str | None:
+        """Return the active situation."""
+        if self.coordinator.data is None:
+            return None
+        try:
+            return SITUATION_TO_OPTION[
+                TemperatureMode(self.coordinator.data.run_state.temperature_mode)
+            ]
+        except (KeyError, ValueError):
+            return None
+
+    async def async_select_option(self, option: str) -> None:
+        """Switch to the manual mode with the selected situation."""
+        if option == self.current_option and (
+            self.coordinator.data is not None
+            and self.coordinator.data.run_state.run_mode == RunMode.MANUAL
+        ):
+            return
+        if option not in SELECTABLE_SITUATIONS:
+            raise ServiceValidationError(
+                "Only the situations at home and away can be selected"
+            )
+        await self.coordinator.async_set_situation(OPTION_TO_SITUATION[option])
 
 
 class ConnectBoxSituationLevel(ConnectBoxDeviceEntity, SelectEntity):
