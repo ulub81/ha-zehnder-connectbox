@@ -66,6 +66,12 @@
     "button": {
       "reset_filter_timer": {
         "name": "Reset filter timer"
+      },
+      "supply_only_candidate_0": {
+        "name": "Test: 38.0.5 = 0 (exhaust fan off)"
+      },
+      "supply_only_candidate_1": {
+        "name": "Test: 38.0.5 = 1 (exhaust fan on)"
       }
     },
     "binary_sensor": {

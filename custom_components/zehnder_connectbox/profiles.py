@@ -107,6 +107,42 @@ CAPTURE_PROPERTY_GROUPS: tuple[tuple[tuple[int, int, int], ...], ...] = (
 )
 CAPTURE_TIME_BUDGET = 40.0
 
+# Temporary test build: candidate for the supply-only mode. On the living-room
+# unit, 38.0.5 went from 1 to 0 while supply-only operation was switched on at
+# the unit and back to 1 when it was switched off; the exhaust fan stood still
+# in between. Two diagnostic buttons write it, to test whether the unit accepts
+# it as a command.
+SUPPLY_ONLY_CANDIDATE = (38, 0, 5)
+SUPPLY_ONLY_CANDIDATE_VALUES = (0, 1)
+CANDIDATE_WRITE_LOG_SIZE = 20
+
+
+def supply_only_candidate_key(device: AttachedDevice) -> PropertyKey | None:
+    """Temporary test build: the unit's key for the supply-only candidate.
+
+    The unit's own key is used when the room model holds the value. Otherwise
+    the key of another value of the same fan is reused with the candidate's
+    property ID, because both come from the same unit profile.
+    """
+    if not supports_sensor_status(device):
+        return None
+    class_id, instance_id, property_id = SUPPLY_ONLY_CANDIDATE
+    for prop in device.properties:
+        if prop.key.value_identity == SUPPLY_ONLY_CANDIDATE:
+            return prop.key
+    for prop in device.properties:
+        key = prop.key
+        if (key.class_id, key.instance_id) == (class_id, instance_id):
+            return PropertyKey(
+                key.product_type,
+                key.hardware_version,
+                key.minimum_software_version,
+                class_id,
+                instance_id,
+                property_id,
+            )
+    return None
+
 # Sensor types in a unit's sensor list (device field 8 of the room model).
 SENSOR_TYPE_TEMPERATURE = 1
 SENSOR_TYPE_HUMIDITY = 2
