@@ -229,16 +229,18 @@
       "boost_until": {
         "name": "Boost until"
       },
-      "summer_role_raw": {
-        "name": "Summer ventilation role (raw value)"
+      "summer_ventilation_role": {
+        "name": "Summer ventilation role",
+        "state": {
+          "supply_and_exhaust": "Supply and exhaust",
+          "supply": "Supply",
+          "exhaust": "Exhaust"
+        }
       }
     },
     "switch": {
       "central_ventilation": {
         "name": "Central ventilation"
-      },
-      "boost": {
-        "name": "Boost"
       }
     }
   }

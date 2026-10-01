@@ -123,14 +123,6 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
             )
         self._accept_command_snapshot(snapshot)
 
-    async def async_set_boost(self, room_id: int, enabled: bool) -> None:
-        """Start or end a room's boost and confirm it."""
-        async with self._io_lock:
-            snapshot = await self.hass.async_add_executor_job(
-                self.client.set_boost, room_id, enabled
-            )
-        self._accept_command_snapshot(snapshot)
-
     async def async_set_mode(self, mode: RunMode) -> None:
         """Set and confirm the system run mode."""
         async with self._io_lock:

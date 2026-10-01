@@ -25,7 +25,13 @@ from .models import (
     TemperatureMode,
     VersionInfo,
 )
-from .profiles import is_supported, property_specs_for_device, supports_sensor_mode
+from .profiles import (
+    PropertySpec,
+    is_supported,
+    optional_property_specs_for_device,
+    property_specs_for_device,
+    supports_sensor_mode,
+)
 from .protocol import (
     OperationType,
     PropertySequenceCommand,
@@ -38,7 +44,6 @@ from .protocol import (
     encode_pairing,
     encode_property_request,
     encode_property_update,
-    encode_room_boost,
     encode_room_level,
     encode_run_state,
 )
@@ -50,9 +55,6 @@ PROPERTY_SETTLE_TIMEOUT = 5.0
 LEVEL_SETTLE_TIMEOUT = 5.0
 LEVEL_SETTLE_POLL_INTERVAL = 0.5
 COMMAND_SETTLE_TIMEOUT = 10.0
-BOOST_MINUTES_DEFAULT = 15
-BOOST_MINUTES_MIN = 15
-BOOST_MINUTES_MAX = 120
 # The app's manual mode offers the situations at home and away. The run-state
 # update carries them as the user location next to the run mode.
 SITUATION_LOCATIONS = {
@@ -261,41 +263,6 @@ class ConnectBoxClient:
         except (ProtocolError, TransportError):
             self.close()
             raise
-
-    def set_boost(self, room_id: int, enabled: bool) -> GatewaySnapshot:
-        """Start a boost for the room's configured duration, or end it early."""
-        try:
-            room = self._find_room(self._read_rooms(), room_id)
-            boost_until = None
-            if enabled:
-                minutes = min(
-                    max(room.boost_duration or BOOST_MINUTES_DEFAULT, BOOST_MINUTES_MIN),
-                    BOOST_MINUTES_MAX,
-                )
-                boost_until = int(time.time()) + minutes * 60
-            self._connected_session().request(
-                OperationType.SET_ROOM_REQUEST,
-                OperationType.SET_ROOM_CONFIRM,
-                encode_room_boost(room, boost_until),
-            )
-            rooms = self._wait_for(
-                self._read_rooms,
-                lambda rooms: self._find_room(rooms, room_id).boost_active(time.time())
-                is enabled,
-            )
-            if self._find_room(rooms, room_id).boost_active(time.time()) is not enabled:
-                raise ProtocolError("gateway did not confirm the boost change")
-            return self.read_snapshot(refresh_properties=False)
-        except (ProtocolError, TransportError):
-            self.close()
-            raise
-
-    @staticmethod
-    def _find_room(rooms: tuple[Room, ...], room_id: int) -> Room:
-        room = next((item for item in rooms if item.room_id == room_id), None)
-        if room is None:
-            raise ProtocolError("room is no longer available")
-        return room
 
     @staticmethod
     def _wait_for[T](read: Callable[[], T], condition: Callable[[T], bool]) -> T:
@@ -546,22 +513,15 @@ class ConnectBoxClient:
                     device,
                     include_filter_properties=request_filter_properties,
                 )
-                for index, spec in enumerate(specs):
-                    if index == 0:
-                        command = PropertySequenceCommand.START
-                    elif index == len(specs) - 1:
-                        command = PropertySequenceCommand.FINISH
-                    else:
-                        command = PropertySequenceCommand.CONTINUE
-                    self._connected_session().request(
-                        OperationType.DEVICE_PROPERTIES_REQUEST,
-                        OperationType.DEVICE_PROPERTIES_CONFIRM,
-                        encode_property_request(
-                            command,
-                            device.device_id,
-                            spec.request_key(device.product_type),
-                        ),
-                    )
+                self._request_properties(device, specs)
+                optional_specs = optional_property_specs_for_device(device)
+                if request_filter_properties and optional_specs:
+                    try:
+                        self._request_properties(device, optional_specs)
+                    except GatewayResponseError:
+                        # The gateway rejects a sequence with an unknown
+                        # property; keep the unit's other telemetry.
+                        self.close()
                 if request_filter_properties:
                     self._fully_requested_devices.add(device_key)
 
@@ -596,6 +556,27 @@ class ConnectBoxClient:
             # and reconnect on the next coordinator refresh.
             self.close()
             return rooms
+
+    def _request_properties(
+        self, device: AttachedDevice, specs: tuple[PropertySpec, ...]
+    ) -> None:
+        """Request one bounded property sequence for a unit."""
+        for index, spec in enumerate(specs):
+            if index == 0:
+                command = PropertySequenceCommand.START
+            elif index == len(specs) - 1:
+                command = PropertySequenceCommand.FINISH
+            else:
+                command = PropertySequenceCommand.CONTINUE
+            self._connected_session().request(
+                OperationType.DEVICE_PROPERTIES_REQUEST,
+                OperationType.DEVICE_PROPERTIES_CONFIRM,
+                encode_property_request(
+                    command,
+                    device.device_id,
+                    spec.request_key(device.product_type),
+                ),
+            )
 
     @staticmethod
     def _property_cache_key(device: AttachedDevice) -> tuple[int, int, int | None]:

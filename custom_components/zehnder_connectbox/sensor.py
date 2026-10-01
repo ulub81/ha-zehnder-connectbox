@@ -38,9 +38,10 @@ from .profiles import (
     INCOMING_AIR_TEMPERATURE,
     SENSOR_TYPE_CO2,
     SENSOR_TYPE_HUMIDITY,
-    SUMMER_ROLE_RAW,
+    SUMMER_VENTILATION_ROLES,
     SUPPLY_FAN_SPEED,
     board_reading,
+    summer_ventilation_role,
     supports_sensor_status,
     temperature_value,
 )
@@ -50,11 +51,11 @@ from .profiles import (
 class ConnectBoxSensorDescription(SensorEntityDescription):
     """Describe how a device value is obtained."""
 
-    value_fn: Callable[[AttachedDevice], int | float | datetime | None]
+    value_fn: Callable[[AttachedDevice], int | float | str | datetime | None]
     # Create the entity only once the unit reports the value (sensor board).
     exists_fn: Callable[[AttachedDevice], bool] | None = None
     # Read the value from the unit's room instead of the unit itself.
-    room_value_fn: Callable[[Room], int | float | datetime | None] | None = None
+    room_value_fn: Callable[[Room], int | float | str | datetime | None] | None = None
     # Keep the entity available while no value is reported (state unknown).
     available_without_value: bool = False
 
@@ -124,12 +125,13 @@ SENSORS = (
         room_value_fn=_temporary_until,
         available_without_value=True,
     ),
-    # Temporary capture build: raw per-unit value to compare with the app.
     ConnectBoxSensorDescription(
-        key="summer_role_raw",
-        translation_key="summer_role_raw",
+        key="summer_ventilation_role",
+        translation_key="summer_ventilation_role",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(SUMMER_VENTILATION_ROLES.values()),
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=SUMMER_ROLE_RAW.value,
+        value_fn=summer_ventilation_role,
         exists_fn=supports_sensor_status,
     ),
     ConnectBoxSensorDescription(
@@ -248,7 +250,7 @@ class ConnectBoxSensor(ConnectBoxDeviceEntity, SensorEntity):
         self._attr_unique_id = f"{gateway_uuid}_{device_id}_{description.key}"
 
     @property
-    def native_value(self) -> int | float | datetime | None:
+    def native_value(self) -> int | float | str | datetime | None:
         """Return the decoded telemetry value."""
         data = self.device_data
         if data is None:
