@@ -8,6 +8,7 @@ import random
 import time
 from datetime import timedelta
 from functools import partial
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -24,7 +25,17 @@ from .const import (
     PROPERTY_REFRESH_INTERVAL,
 )
 from .models import GatewaySnapshot, RunMode
-from .profiles import FILTER_RUNTIME, format_version, product_name
+from .profiles import (
+    FAN_SCAN_GROUPS,
+    FILTER_RUNTIME,
+    PROPERTY_SCAN_GROUPS,
+    PROPERTY_SCAN_MAX_DEVICES,
+    PROPERTY_SCAN_TIME_BUDGET,
+    format_version,
+    product_name,
+    supports_sensor_mode,
+    supports_sensor_status,
+)
 from .protocol import ProtocolError
 from .transport import CertificateMismatchError, TransportError
 
@@ -145,6 +156,53 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         self._last_property_refresh = time.monotonic()
         self._last_filter_property_refresh = self._last_property_refresh
         self._accept_command_snapshot(snapshot)
+
+    async def async_scan_properties(self) -> dict[str, Any]:
+        """Run the temporary, read-only property discovery for the diagnostics.
+
+        The sensor-board candidates are read for the first unit with a detected
+        sensor board; the fan-unit candidates for every ComfoSpot 50.
+        """
+        snapshot = self.data
+        if snapshot is None:
+            return {"status": "no gateway data"}
+        attached = [
+            (room, device) for room in snapshot.rooms for device in room.devices
+        ]
+        board_units = [
+            device.device_id
+            for room, device in attached
+            if supports_sensor_mode(room, device)
+        ][:PROPERTY_SCAN_MAX_DEVICES]
+        targets: list[tuple[int, int, tuple]] = []
+        indexes: dict[int, int] = {}
+        for index, (_room, device) in enumerate(attached):
+            if not supports_sensor_status(device):
+                continue
+            groups = FAN_SCAN_GROUPS
+            if device.device_id in board_units:
+                groups = PROPERTY_SCAN_GROUPS + FAN_SCAN_GROUPS
+            targets.append((device.device_id, device.product_type, groups))
+            indexes[device.device_id] = index
+        if not targets:
+            return {"status": "no ComfoSpot 50 attached"}
+
+        deadline = time.monotonic() + PROPERTY_SCAN_TIME_BUDGET
+        async with self._io_lock:
+            results = await self.hass.async_add_executor_job(
+                partial(self.client.scan_properties, tuple(targets), deadline=deadline)
+            )
+        return {
+            "status": "completed",
+            "devices": [
+                {
+                    "attached_device_index": indexes[device_id],
+                    "sensor_board_groups": device_id in board_units,
+                    **result,
+                }
+                for device_id, result in results.items()
+            ],
+        }
 
     async def async_close(self) -> None:
         """Close the client outside Home Assistant's event loop."""

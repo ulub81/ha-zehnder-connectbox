@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from typing import Any
 from uuid import UUID, uuid4
 
 from .const import (
@@ -44,6 +45,11 @@ from .transport import ConnectBoxTransport, TransportError
 
 PAIRING_NICKNAME = "Home Assistant"
 PROPERTY_SETTLE_TIMEOUT = 5.0
+# Temporary property discovery (see profiles.PROPERTY_SCAN_GROUPS).
+SCAN_REQUEST_TIMEOUT = 3.0
+SCAN_SETTLE_TIMEOUT = 15.0
+SCAN_POLL_INTERVAL = 0.5
+type ScanGroups = tuple[tuple[int, int, tuple[int, ...]], ...]
 
 
 class PairingError(ConnectionError):
@@ -245,6 +251,126 @@ class ConnectBoxClient:
         except (ProtocolError, TransportError):
             self.close()
             raise
+
+    def scan_properties(
+        self,
+        targets: tuple[tuple[int, int, ScanGroups], ...],
+        *,
+        deadline: float,
+    ) -> dict[int, dict[str, Any]]:
+        """Request candidate properties once and report what the gateway returns.
+
+        Temporary, read-only discovery for the diagnostics: only device-property
+        read requests and room reads are sent. Each target is (device ID,
+        product type, groups) and each group is one bounded read sequence, so a
+        rejected group does not affect the others. All requests are sent first
+        and the values are then collected in one bounded settle loop.
+        """
+        wanted = {
+            device_id: {
+                (class_id, instance_id, property_id)
+                for class_id, instance_id, property_ids in groups
+                for property_id in property_ids
+            }
+            for device_id, _product_type, groups in targets
+        }
+        errors: dict[int, list[str]] = {device_id: [] for device_id in wanted}
+        for device_id, product_type, groups in targets:
+            for class_id, instance_id, property_ids in groups:
+                if time.monotonic() >= deadline:
+                    errors[device_id].append(
+                        f"{class_id}.{instance_id}: skipped, time budget used"
+                    )
+                    continue
+                last = len(property_ids) - 1
+                try:
+                    session = self._connected_session()
+                    for index, property_id in enumerate(property_ids):
+                        if index == 0:
+                            command = PropertySequenceCommand.START
+                        elif index == last:
+                            command = PropertySequenceCommand.FINISH
+                        else:
+                            command = PropertySequenceCommand.CONTINUE
+                        key = PropertyKey(
+                            product_type, 255, 0, class_id, instance_id, property_id
+                        )
+                        session.request(
+                            OperationType.DEVICE_PROPERTIES_REQUEST,
+                            OperationType.DEVICE_PROPERTIES_CONFIRM,
+                            encode_property_request(command, device_id, key),
+                            timeout=SCAN_REQUEST_TIMEOUT,
+                        )
+                except (ProtocolError, TransportError) as err:
+                    errors[device_id].append(
+                        f"{class_id}.{instance_id}: {type(err).__name__}: {err}"
+                    )
+                    self.close()
+
+        found: dict[int, dict[tuple[int, int, int], bytes]] = {
+            device_id: {} for device_id in wanted
+        }
+        empty: dict[int, set[tuple[int, int, int]]] = {
+            device_id: set() for device_id in wanted
+        }
+        settle_deadline = min(deadline, time.monotonic() + SCAN_SETTLE_TIMEOUT)
+        while True:
+            try:
+                rooms = self._read_rooms()
+            except (ProtocolError, TransportError) as err:
+                for device_errors in errors.values():
+                    device_errors.append(f"room read: {type(err).__name__}: {err}")
+                self.close()
+                break
+            for room in rooms:
+                for device in room.devices:
+                    if device.device_id not in wanted:
+                        continue
+                    device_found = found[device.device_id]
+                    device_empty = empty[device.device_id]
+                    for value in device.properties:
+                        identity = value.key.value_identity
+                        if (
+                            identity not in wanted[device.device_id]
+                            or value.value is None
+                        ):
+                            continue
+                        if value.value:
+                            device_found[identity] = value.value
+                            device_empty.discard(identity)
+                        elif identity not in device_found:
+                            device_empty.add(identity)
+            complete = all(
+                len(found[device_id]) == len(keys) for device_id, keys in wanted.items()
+            )
+            if complete or time.monotonic() >= settle_deadline:
+                break
+            time.sleep(SCAN_POLL_INTERVAL)
+
+        def label(identity: tuple[int, int, int]) -> str:
+            return ".".join(str(part) for part in identity)
+
+        return {
+            device_id: {
+                "values": {
+                    label(identity): {
+                        "hex": raw[:32].hex(),
+                        "uint_le": int.from_bytes(raw[:8], "little"),
+                        "int_le": int.from_bytes(raw[:8], "little", signed=True),
+                    }
+                    for identity, raw in sorted(found[device_id].items())
+                },
+                "empty": [label(identity) for identity in sorted(empty[device_id])],
+                "no_response": [
+                    label(identity)
+                    for identity in sorted(
+                        keys - found[device_id].keys() - empty[device_id]
+                    )
+                ],
+                "errors": errors[device_id],
+            }
+            for device_id, keys in wanted.items()
+        }
 
     def close(self) -> None:
         """Close the shared transport."""
