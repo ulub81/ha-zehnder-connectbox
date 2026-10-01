@@ -9,6 +9,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 - Show the relative humidity and CO2 concentration measured by the sensor
   board of ComfoSpot 50 units that report them.
+- Include the current level, the humidity and CO2 readings, and readings of
+  not yet mapped sensor types in the diagnostics.
 
 ### Changed
 
