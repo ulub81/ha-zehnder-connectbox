@@ -92,7 +92,7 @@ information when reported by the gateway.
 | Entity | Home Assistant type | Function |
 | --- | --- | --- |
 | Ventilation | Fan | Levels 1–4 as 25–100%, named level presets, sensor-controlled Auto where a sensor board is detected, and off where supported |
-| Extract air temperature | Sensor | Temperature of air extracted from the room |
+| Extract air temperature | Sensor | Temperature of air extracted from the room; created when a usable value is reported |
 | Incoming air temperature | Sensor | Temperature of incoming outdoor air |
 | Humidity | Sensor | Relative humidity measured by the sensor board; only on ComfoSpot 50 units that report it |
 | CO2 | Sensor | CO2 concentration measured by the sensor board; only on ComfoSpot 50 units that report it |
@@ -111,7 +111,7 @@ information when reported by the gateway.
 | Level at home, asleep, away, frost protection | Configuration select | Configured level of the unit's room for each situation of the official app |
 | Temporary change until | Sensor | End of a temporary change, such as a level changed on the unit's control panel; unknown while none is active |
 | Boost until | Sensor | End of a running boost; unknown while none is running |
-| Summer ventilation role | Diagnostic sensor | Whether the unit supplies, exhausts, or supplies and exhausts air during the summer ventilation, as set in the official app; ComfoSpot 50 |
+| Summer ventilation role | Diagnostic sensor | Whether the unit supplies, exhausts, or supplies and exhausts air during the summer ventilation, as set in the official app; created when a ComfoSpot 50 reports it |
 | Reset filter timer | Configuration button | Resets the filter counter after filter maintenance; currently verified for ComfoSpot 50 |
 
 The ventilation fan entity provides Home Assistant's standard power and speed
