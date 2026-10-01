@@ -169,11 +169,10 @@ def test_capture_without_targets_reads_state():
 
 
 class FakeCoordinator:
-    def __init__(self, data, capture, candidate_writes=()):
+    def __init__(self, data, capture):
         self.data = data
         self.last_update_success = True
         self._capture = capture
-        self.candidate_writes = list(candidate_writes)
 
     async def async_capture(self):
         if isinstance(self._capture, Exception):
@@ -189,9 +188,9 @@ def snapshot(summer=0):
     )
 
 
-def diagnostics_for(capture, candidate_writes=(), data=None):
+def diagnostics_for(capture, data=None):
     entry = SimpleNamespace(
-        runtime_data=FakeCoordinator(snapshot(), capture, candidate_writes),
+        runtime_data=FakeCoordinator(snapshot(), capture),
         version=1,
         data=data or {},
     )
@@ -291,9 +290,3 @@ def test_diagnostics_probe_short_raw_value():
     fresh_rooms = decode_rooms(rooms_message(extra=encode_bytes(101, b"\xff\xff")))
     result = diagnostics_for((decode_run_state(run_state_message(0)), fresh_rooms, {}))
     assert result["capture"]["fields"]["room[1].f101"] == {"hex": "ffff"}
-
-
-def test_diagnostics_lists_candidate_writes():
-    writes = [{"device": 7, "property": "38.0.5", "value": 0, "result": "confirmed"}]
-    result = diagnostics_for(TimeoutError(), candidate_writes=writes)
-    assert result["capture"]["candidate_writes"] == writes
