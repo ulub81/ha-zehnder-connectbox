@@ -68,9 +68,28 @@ class RunState:
     standby: bool | None
     standby_mode: int | None
     summer_ventilation: bool | None
+    summer_ventilation_end: int | None
     errors: tuple[int, ...]
     # Temporary capture build: the undecoded run-state message.
     raw: bytes = field(default=b"", repr=False, compare=False)
+
+    def summer_ventilation_running(self, now: float) -> bool | None:
+        """Interpret the reported flag together with its expiry time."""
+        if self.summer_ventilation is None:
+            return None
+        if not self.summer_ventilation:
+            return False
+        if self.summer_ventilation_end is None:
+            return None
+        return self.summer_ventilation_end > now
+
+
+@dataclass(frozen=True, slots=True)
+class SummerVentilationSettings:
+    """Gateway-wide summer function configuration."""
+
+    enabled: bool
+    duration_hours: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +143,7 @@ class AttachedDevice:
     filter_maximum: int | None
     properties: tuple[PropertyValue, ...]
     sensor_readings: tuple[tuple[int, int], ...] = ()
+    summer_ventilation_available: bool | None = None
 
     def property_bytes(self, identity: tuple[int, int, int]) -> bytes | None:
         """Return a raw profile value by class, instance, and property ID."""
@@ -188,6 +208,7 @@ class GatewaySnapshot:
     version: VersionInfo
     run_state: RunState
     rooms: tuple[Room, ...]
+    summer_ventilation_settings: SummerVentilationSettings | None = None
 
     def find_device(self, device_id: int) -> tuple[Room, AttachedDevice] | None:
         """Find a device together with its containing room."""
