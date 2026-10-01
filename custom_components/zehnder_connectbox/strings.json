@@ -228,6 +228,9 @@
       },
       "boost_until": {
         "name": "Boost until"
+      },
+      "summer_role_raw": {
+        "name": "Summer ventilation role (raw value)"
       }
     },
     "switch": {

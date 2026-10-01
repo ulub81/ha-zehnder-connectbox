@@ -38,8 +38,10 @@ from .profiles import (
     INCOMING_AIR_TEMPERATURE,
     SENSOR_TYPE_CO2,
     SENSOR_TYPE_HUMIDITY,
+    SUMMER_ROLE_RAW,
     SUPPLY_FAN_SPEED,
     board_reading,
+    supports_sensor_status,
     temperature_value,
 )
 
@@ -121,6 +123,14 @@ SENSORS = (
         value_fn=lambda device: None,
         room_value_fn=_temporary_until,
         available_without_value=True,
+    ),
+    # Temporary capture build: raw per-unit value to compare with the app.
+    ConnectBoxSensorDescription(
+        key="summer_role_raw",
+        translation_key="summer_role_raw",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=SUMMER_ROLE_RAW.value,
+        exists_fn=supports_sensor_status,
     ),
     ConnectBoxSensorDescription(
         key="boost_until",

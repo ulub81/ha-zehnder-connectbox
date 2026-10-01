@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections import Counter
 import time
+from collections import Counter
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -60,17 +60,23 @@ def _is_text(value: bytes) -> bool:
         return False
 
 
-def _varint_message(value: bytes) -> tuple[Field, ...] | None:
-    """Return nested fields when a byte field is a message of plain numbers."""
+def _nested_message(value: bytes, *, numbers_only: bool) -> tuple[Field, ...] | None:
+    """Return nested fields when a byte field is a message and not text.
+
+    Room and device data may hold identities, so only messages of plain
+    numbers are expanded there. Run-state messages are expanded completely.
+    """
     if not value or _is_text(value):
         return None
     try:
         fields = decode_fields(value)
     except ProtobufDecodeError:
         return None
-    if fields and all(item.wire_type is WireType.VARINT for item in fields):
-        return fields
-    return None
+    if not fields:
+        return None
+    if numbers_only and not all(item.wire_type is WireType.VARINT for item in fields):
+        return None
+    return fields
 
 
 def _flatten(
@@ -107,14 +113,15 @@ def _flatten(
                 capture_value(raw_value) if raw_value else None
             )
             continue
-        nested = _varint_message(value)
+        run_state = context.startswith("run_state")
+        nested = _nested_message(value, numbers_only=not run_state)
         if nested is None:
             out[key] = f"bytes(len={len(value)})"
         elif context == "room" and item.number == 19:
             mode = _temperature_mode_name(uint_value(nested, 1) or 0)
             _flatten(nested, f"{prefix}.vent[{mode}]", out, "nested")
         else:
-            _flatten(nested, key, out, "nested")
+            _flatten(nested, key, out, "run_state_nested" if run_state else "nested")
 
 
 def _raw_state(run_state_raw: bytes, rooms: tuple[Room, ...]) -> dict[str, Any]:

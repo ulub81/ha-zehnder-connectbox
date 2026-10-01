@@ -87,6 +87,9 @@ CAPTURE_PROPERTY_GROUPS: tuple[tuple[tuple[int, int, int], ...], ...] = (
     ((36, 1, 3), (36, 1, 4)),
 )
 CAPTURE_TIME_BUDGET = 40.0
+# Temporary capture build: per-unit value that differs between units (0, 1,
+# 2), possibly the unit's role in the app's summer ventilation.
+SUMMER_ROLE_RAW = PropertySpec((38, 0, 11), 1)
 
 # Sensor types in a unit's sensor list (device field 8 of the room model).
 SENSOR_TYPE_TEMPERATURE = 1

@@ -228,6 +228,9 @@
       },
       "boost_until": {
         "name": "Stoßlüftung bis"
+      },
+      "summer_role_raw": {
+        "name": "Rolle Sommerlüftung (Rohwert)"
       }
     },
     "switch": {
