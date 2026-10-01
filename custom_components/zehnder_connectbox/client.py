@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
-from dataclasses import replace
 from collections.abc import Callable
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 from .const import (
