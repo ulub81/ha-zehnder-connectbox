@@ -201,7 +201,8 @@ def decode_version(message: bytes) -> VersionInfo:
 def decode_run_state(message: bytes) -> RunState:
     """Decode the current system state."""
     outer = decode_fields(message)
-    fields = decode_fields(_required_bytes(outer, 1, "run state"))
+    inner = _required_bytes(outer, 1, "run state")
+    fields = decode_fields(inner)
     standby = uint_value(fields, 7)
     summer = uint_value(fields, 12)
     return RunState(
@@ -211,6 +212,7 @@ def decode_run_state(message: bytes) -> RunState:
         standby_mode=uint_value(fields, 8),
         summer_ventilation=bool(summer) if summer is not None else None,
         errors=uint_values(fields, 11),
+        raw=inner,
     )
 
 

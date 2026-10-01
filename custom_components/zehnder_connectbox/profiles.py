@@ -72,6 +72,22 @@ SENSOR_STATUS_SPECS = (
     CO2_SENSOR_STATUS,
 )
 
+# Temporary capture build: properties that the official app reads from
+# ComfoSpot 50 units, read once per diagnostics download to locate summer
+# ventilation, supply-only operation, and boost. Each group is one bounded
+# read sequence, so a rejected group does not affect the others.
+CAPTURE_PROPERTY_GROUPS: tuple[tuple[tuple[int, int, int], ...], ...] = (
+    ((38, 0, 5), (38, 0, 6), (38, 0, 8)),
+    ((38, 0, 9), (38, 0, 10), (38, 0, 11)),
+    ((38, 0, 13), (38, 0, 14)),
+    ((38, 0, 18), (38, 0, 19)),
+    ((38, 1, 5), (38, 1, 6)),
+    ((38, 1, 18), (38, 1, 19)),
+    ((36, 0, 3), (36, 0, 4)),
+    ((36, 1, 3), (36, 1, 4)),
+)
+CAPTURE_TIME_BUDGET = 40.0
+
 # Sensor types in a unit's sensor list (device field 8 of the room model).
 SENSOR_TYPE_TEMPERATURE = 1
 SENSOR_TYPE_HUMIDITY = 2

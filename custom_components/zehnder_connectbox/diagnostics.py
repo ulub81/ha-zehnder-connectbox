@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from . import ZehnderConnectBoxConfigEntry
-from .models import RunMode, TemperatureMode
+from .client import capture_value
+from .models import Room, RunMode, TemperatureMode
 from .profiles import (
     CO2_SENSOR_STATUS,
     EXHAUST_FAN_SPEED,
@@ -30,6 +33,14 @@ from .profiles import (
     supports_sensor_mode,
     temperature_value,
 )
+from .protobuf import (
+    Field,
+    ProtobufDecodeError,
+    WireType,
+    bytes_value,
+    decode_fields,
+    uint_value,
+)
 
 
 def _temperature_mode_name(mode: int) -> str:
@@ -38,6 +49,82 @@ def _temperature_mode_name(mode: int) -> str:
         return TemperatureMode(mode).name.lower()
     except ValueError:
         return str(mode)
+
+
+def _is_text(value: bytes) -> bool:
+    """Return whether a byte field looks like text, such as a name."""
+    try:
+        return value.decode().isprintable()
+    except UnicodeDecodeError:
+        return False
+
+
+def _varint_message(value: bytes) -> tuple[Field, ...] | None:
+    """Return nested fields when a byte field is a message of plain numbers."""
+    if not value or _is_text(value):
+        return None
+    try:
+        fields = decode_fields(value)
+    except ProtobufDecodeError:
+        return None
+    if fields and all(item.wire_type is WireType.VARINT for item in fields):
+        return fields
+    return None
+
+
+def _flatten(
+    fields: tuple[Field, ...], prefix: str, out: dict[str, Any], context: str
+) -> None:
+    """Temporary: flatten gateway fields without names, text, or other bytes."""
+    seen: Counter[int] = Counter()
+    for item in fields:
+        index = seen[item.number]
+        seen[item.number] += 1
+        key = f"{prefix}.f{item.number}" + (f"[{index}]" if index else "")
+        if item.wire_type is WireType.VARINT:
+            out[key] = int(item.value)
+            continue
+        if item.wire_type is not WireType.BYTES:
+            out[key] = f"fixed(len={len(item.value)})"
+            continue
+        value = bytes(item.value)
+        if context in ("room", "device") and item.number == 2:
+            continue  # room name or device serial number
+        if context == "room" and item.number == 8:
+            nested = decode_fields(value)
+            device_prefix = f"{prefix}.device[{uint_value(nested, 1)}]"
+            _flatten(nested, device_prefix, out, "device")
+            continue
+        if context == "device" and item.number == 101:
+            nested = decode_fields(value)
+            key_fields = decode_fields(bytes_value(nested, 1) or b"")
+            identity = ".".join(
+                str(uint_value(key_fields, number)) for number in (4, 5, 6)
+            )
+            raw_value = bytes_value(nested, 2)
+            out[f"{prefix}.prop[{identity}]"] = (
+                capture_value(raw_value) if raw_value else None
+            )
+            continue
+        nested = _varint_message(value)
+        if nested is None:
+            out[key] = f"bytes(len={len(value)})"
+        elif context == "room" and item.number == 19:
+            mode = _temperature_mode_name(uint_value(nested, 1) or 0)
+            _flatten(nested, f"{prefix}.vent[{mode}]", out, "nested")
+        else:
+            _flatten(nested, key, out, "nested")
+
+
+def _raw_state(run_state_raw: bytes, rooms: tuple[Room, ...]) -> dict[str, Any]:
+    """Temporary: all numeric run-state, room, and device fields."""
+    out: dict[str, Any] = {}
+    if run_state_raw:
+        _flatten(decode_fields(run_state_raw), "run_state", out, "run_state")
+    for room in rooms:
+        if room.raw:
+            _flatten(decode_fields(room.raw), f"room[{room.room_id}]", out, "room")
+    return out
 
 
 async def async_get_config_entry_diagnostics(
@@ -54,7 +141,7 @@ async def async_get_config_entry_diagnostics(
     except ValueError:
         run_mode = "unknown"
     devices = [device for room in snapshot.rooms for device in room.devices]
-    return {
+    result: dict[str, Any] = {
         "available": coordinator.last_update_success,
         "config_entry_version": entry.version,
         "gateway": {
@@ -136,3 +223,29 @@ async def async_get_config_entry_diagnostics(
             for device in room.devices
         ],
     }
+
+    # Temporary capture build: numeric run-state, room, and device fields and
+    # the app's ComfoSpot 50 properties, read fresh at download time, to
+    # compare states before and after a change in the app or on a unit.
+    # Only read requests are sent.
+    capture: dict[str, Any] = {
+        "captured_at": dt_util.utcnow().isoformat(timespec="seconds")
+    }
+    run_state_raw, rooms = snapshot.run_state.raw, snapshot.rooms
+    try:
+        run_state, rooms, properties = await coordinator.async_capture()
+    except Exception as err:  # noqa: BLE001 - diagnostics must still be returned
+        capture["source"] = "last poll"
+        capture["error"] = type(err).__name__
+    else:
+        run_state_raw = run_state.raw
+        capture["source"] = "fresh read"
+        capture["app_properties"] = {
+            str(device_id): values for device_id, values in properties.items()
+        }
+    try:
+        capture["fields"] = _raw_state(run_state_raw, rooms)
+    except ProtobufDecodeError:
+        capture["fields"] = {"status": "failed", "error": "ProtobufDecodeError"}
+    result["capture"] = capture
+    return result

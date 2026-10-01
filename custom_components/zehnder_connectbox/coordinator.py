@@ -23,8 +23,15 @@ from .const import (
     POLL_INTERVAL,
     PROPERTY_REFRESH_INTERVAL,
 )
-from .models import GatewaySnapshot, RunMode
-from .profiles import FILTER_RUNTIME, format_version, product_name
+from .models import GatewaySnapshot, Room, RunMode, RunState
+from .profiles import (
+    CAPTURE_PROPERTY_GROUPS,
+    CAPTURE_TIME_BUDGET,
+    FILTER_RUNTIME,
+    format_version,
+    product_name,
+    supports_sensor_status,
+)
 from .protocol import ProtocolError
 from .transport import CertificateMismatchError, TransportError
 
@@ -147,6 +154,31 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         self._last_property_refresh = time.monotonic()
         self._last_filter_property_refresh = self._last_property_refresh
         self._accept_command_snapshot(snapshot)
+
+    async def async_capture(
+        self,
+    ) -> tuple[RunState, tuple[Room, ...], dict[int, dict[str, object]]]:
+        """Temporary capture build: read app properties and a fresh state.
+
+        Used only when the diagnostics are downloaded. The app's properties are
+        requested for every ComfoSpot 50; nothing is written.
+        """
+        snapshot = self.data
+        devices = (
+            [device for room in snapshot.rooms for device in room.devices]
+            if snapshot is not None
+            else []
+        )
+        targets = tuple(
+            (device.device_id, device.product_type, CAPTURE_PROPERTY_GROUPS)
+            for device in devices
+            if supports_sensor_status(device)
+        )
+        deadline = time.monotonic() + CAPTURE_TIME_BUDGET
+        async with self._io_lock:
+            return await self.hass.async_add_executor_job(
+                partial(self.client.capture, targets, deadline=deadline)
+            )
 
     async def async_close(self) -> None:
         """Close the client outside Home Assistant's event loop."""

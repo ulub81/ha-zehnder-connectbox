@@ -69,6 +69,8 @@ class RunState:
     standby_mode: int | None
     summer_ventilation: bool | None
     errors: tuple[int, ...]
+    # Temporary capture build: the undecoded run-state message.
+    raw: bytes = field(default=b"", repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

@@ -46,6 +46,18 @@ PAIRING_NICKNAME = "Home Assistant"
 PROPERTY_SETTLE_TIMEOUT = 5.0
 LEVEL_SETTLE_TIMEOUT = 5.0
 LEVEL_SETTLE_POLL_INTERVAL = 0.5
+# Temporary capture build (see profiles.CAPTURE_PROPERTY_GROUPS).
+CAPTURE_REQUEST_TIMEOUT = 3.0
+CAPTURE_SETTLE_TIMEOUT = 15.0
+CAPTURE_POLL_INTERVAL = 0.5
+type CaptureGroups = tuple[tuple[tuple[int, int, int], ...], ...]
+
+
+def capture_value(raw: bytes) -> dict[str, int | str]:
+    """Show short property values only; longer ones may contain text."""
+    if len(raw) > 4:
+        return {"length": len(raw)}
+    return {"hex": raw.hex(), "uint_le": int.from_bytes(raw, "little")}
 
 
 class PairingError(ConnectionError):
@@ -279,6 +291,107 @@ class ConnectBoxClient:
         except (ProtocolError, TransportError):
             self.close()
             raise
+
+    def capture(
+        self,
+        targets: tuple[tuple[int, int, CaptureGroups], ...],
+        *,
+        deadline: float,
+    ) -> tuple[RunState, tuple[Room, ...], dict[int, dict[str, object]]]:
+        """Temporary capture build: read app properties and a fresh state once.
+
+        Only read requests are sent. Each target is (device ID, product type,
+        groups) and each group is one bounded read sequence, so a rejected
+        group does not affect the others. The values are collected from the
+        room model, which is returned together with a fresh run state.
+        """
+        wanted = {
+            device_id: {key for group in groups for key in group}
+            for device_id, _product_type, groups in targets
+        }
+        errors: dict[int, list[str]] = {device_id: [] for device_id in wanted}
+
+        def label(key: tuple[int, int, int]) -> str:
+            return ".".join(str(part) for part in key)
+
+        for device_id, product_type, groups in targets:
+            for group in groups:
+                group_label = ",".join(label(key) for key in group)
+                if time.monotonic() >= deadline:
+                    errors[device_id].append(f"{group_label}: skipped, time budget")
+                    continue
+                last = len(group) - 1
+                try:
+                    session = self._connected_session()
+                    for index, key in enumerate(group):
+                        if index == 0:
+                            command = PropertySequenceCommand.START
+                        elif index == last:
+                            command = PropertySequenceCommand.FINISH
+                        else:
+                            command = PropertySequenceCommand.CONTINUE
+                        session.request(
+                            OperationType.DEVICE_PROPERTIES_REQUEST,
+                            OperationType.DEVICE_PROPERTIES_CONFIRM,
+                            encode_property_request(
+                                command,
+                                device_id,
+                                PropertyKey(product_type, 255, 0, *key),
+                            ),
+                            timeout=CAPTURE_REQUEST_TIMEOUT,
+                        )
+                except (ProtocolError, TransportError) as err:
+                    errors[device_id].append(
+                        f"{group_label}: {type(err).__name__}: {err}"
+                    )
+                    self.close()
+
+        found: dict[int, dict[tuple[int, int, int], bytes]] = {
+            device_id: {} for device_id in wanted
+        }
+        settle_deadline = min(deadline, time.monotonic() + CAPTURE_SETTLE_TIMEOUT)
+        try:
+            while True:
+                rooms = self._read_rooms()
+                for room in rooms:
+                    for device in room.devices:
+                        keys = wanted.get(device.device_id)
+                        if keys is None:
+                            continue
+                        for value in device.properties:
+                            identity = value.key.value_identity
+                            if identity in keys and value.value:
+                                found[device.device_id][identity] = value.value
+                complete = all(
+                    len(found[device_id]) == len(keys)
+                    for device_id, keys in wanted.items()
+                )
+                if complete or time.monotonic() >= settle_deadline:
+                    break
+                time.sleep(CAPTURE_POLL_INTERVAL)
+            run_state = self._read_run_state()
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+        return (
+            run_state,
+            rooms,
+            {
+                device_id: {
+                    "values": {
+                        label(identity): capture_value(raw)
+                        for identity, raw in sorted(found[device_id].items())
+                    },
+                    "missing": [
+                        label(identity)
+                        for identity in sorted(keys - found[device_id].keys())
+                    ],
+                    "errors": errors[device_id],
+                }
+                for device_id, keys in wanted.items()
+            },
+        )
 
     def close(self) -> None:
         """Close the shared transport."""
