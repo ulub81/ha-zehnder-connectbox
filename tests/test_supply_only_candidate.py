@@ -1,4 +1,4 @@
-"""Offline checks for the temporary supply-only test writes (fork main only)."""
+"""Offline checks for the temporary 38.0.5 test write (fork main only)."""
 
 from __future__ import annotations
 
@@ -161,7 +161,7 @@ def make_client(gateway):
 KEY = PropertyKey(30, 255, 0, 38, 0, 5)
 
 
-@pytest.mark.parametrize("value", [0, 1])
+@pytest.mark.parametrize("value", [1])
 def test_client_writes_candidate(value):
     gateway = FakeGateway(rooms_message(device_message()))
     client = make_client(gateway)
@@ -183,7 +183,7 @@ def test_client_writes_candidate(value):
 
 @pytest.mark.parametrize(
     ("key", "value"),
-    [(PropertyKey(30, 255, 0, 38, 0, 15), 0), (KEY, 2), (KEY, 255)],
+    [(PropertyKey(30, 255, 0, 38, 0, 15), 1), (KEY, 0), (KEY, 2), (KEY, 255)],
 )
 def test_client_refuses_other_writes(key, value):
     gateway = FakeGateway(rooms_message(device_message()))
@@ -203,7 +203,7 @@ def test_client_refuses_other_devices(message, device_id):
     gateway = FakeGateway(message)
     client = make_client(gateway)
     with pytest.raises(client_mod.ProtocolError):
-        client.write_supply_only_candidate(device_id, KEY, 0)
+        client.write_supply_only_candidate(device_id, KEY, 1)
     assert gateway.requests == []
     assert client.closed == 1
 
@@ -212,7 +212,7 @@ def test_client_reports_rejection():
     gateway = FakeGateway(rooms_message(device_message()), reject=True)
     client = make_client(gateway)
     with pytest.raises(GatewayResponseError):
-        client.write_supply_only_candidate(7, KEY, 0)
+        client.write_supply_only_candidate(7, KEY, 1)
     assert client.closed == 1
 
 
@@ -245,13 +245,13 @@ def test_coordinator_logs_confirmed_write():
         return "new snapshot"
 
     coordinator = make_coordinator(rooms_message(device_message()), write)
-    asyncio.run(coordinator.async_write_supply_only_candidate(7, 0))
-    assert calls == [(7, KEY, 0)]
+    asyncio.run(coordinator.async_write_supply_only_candidate(7, 1))
+    assert calls == [(7, KEY, 1)]
     assert coordinator.accepted == ["new snapshot"]
     [record] = coordinator.candidate_writes
     assert record["device"] == 7
-    assert record["property"] == "38.0.5"
-    assert record["value"] == 0
+    assert record["target"] == "property 38.0.5"
+    assert record["value"] == 1
     assert record["result"] == "confirmed"
     assert record["at"]
 
@@ -260,7 +260,7 @@ def test_coordinator_logs_confirmed_write():
     ("error", "result"),
     [
         (GatewayResponseError(2, None), "rejected with result 2"),
-        (TimeoutError(), "failed: TimeoutError"),
+        (TimeoutError("no answer"), "failed: TimeoutError: no answer"),
     ],
 )
 def test_coordinator_logs_failed_write(error, result):
@@ -288,7 +288,7 @@ def test_coordinator_refuses_device_without_fan_values():
         rooms_message(device_message(properties=())), lambda *_args: "snapshot"
     )
     with pytest.raises(client_mod.ProtocolError):
-        asyncio.run(coordinator.async_write_supply_only_candidate(7, 0))
+        asyncio.run(coordinator.async_write_supply_only_candidate(7, 1))
     assert coordinator.candidate_writes == []
 
 
@@ -334,27 +334,23 @@ def test_buttons_for_comfospot_units_only():
         device_message(device_id=9, properties=()),
     )
     entities = candidate_buttons(FakeCoordinator(snapshot(message)))
-    assert [(e.device_id, e._value) for e in entities] == [(7, 0), (7, 1)]
-    assert [e.translation_key for e in entities] == [
-        "supply_only_candidate_0",
-        "supply_only_candidate_1",
-    ]
-    assert entities[0].unique_id == "gw_7_supply_only_candidate_0"
+    assert [(e.device_id, e._value) for e in entities] == [(7, 1)]
+    assert [e.translation_key for e in entities] == ["supply_only_candidate_1"]
+    assert entities[0].unique_id == "gw_7_supply_only_candidate_1"
     assert all(e.available for e in entities)
 
 
 def test_button_press_writes_value():
     coordinator = FakeCoordinator(snapshot(rooms_message(device_message())))
-    entities = candidate_buttons(coordinator)
-    asyncio.run(entities[0].async_press())
-    asyncio.run(entities[1].async_press())
-    assert coordinator.calls == [(7, 0), (7, 1)]
+    [entity] = candidate_buttons(coordinator)
+    asyncio.run(entity.async_press())
+    assert coordinator.calls == [(7, 1)]
 
 
 def test_button_reports_rejection():
     coordinator = FakeCoordinator(
         snapshot(rooms_message(device_message())), error=GatewayResponseError(2, None)
     )
-    [off, _on] = candidate_buttons(coordinator)
-    with pytest.raises(HomeAssistantError, match="38.0.5 = 0"):
-        asyncio.run(off.async_press())
+    [entity] = candidate_buttons(coordinator)
+    with pytest.raises(HomeAssistantError, match="38.0.5 = 1"):
+        asyncio.run(entity.async_press())
