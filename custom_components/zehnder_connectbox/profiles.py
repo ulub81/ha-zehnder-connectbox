@@ -164,10 +164,11 @@ def optional_property_specs_for_device(
 # in between. The ConnectBox confirms a write of this value, but the unit does
 # not change, so it is only read.
 EXHAUST_FAN_ENABLED = PropertySpec((38, 0, 5), 1)
-# Read with every property refresh in its own sequence, so a unit that rejects
-# it keeps its telemetry. This three-item sequence was read successfully from
-# five ComfoSpot 50 units; the two neighbouring values are requested only to
-# keep that verified sequence.
+# Read with every property refresh in its own sequence after the core
+# telemetry, like the optional settings. A unit that rejects it keeps its
+# telemetry and is not asked again until the integration is reloaded. This
+# three-item sequence was read successfully from five ComfoSpot 50 units; the
+# two neighbouring values are requested only to keep that verified sequence.
 FAN_STATE_PROPERTY_SPECS = (
     EXHAUST_FAN_ENABLED,
     PropertySpec((38, 0, 6), 1),
@@ -251,7 +252,10 @@ def board_reading(device: AttachedDevice, sensor_type: int) -> int | None:
 
     Each unit reports a list of (sensor type, value) pairs in the room model:
     temperature in 0.1 °C, relative humidity in %, and CO2 in ppm. The types
-    were matched against six ComfoSpot 50 units with CO2 sensor boards.
+    were matched against six ComfoSpot 50 units with sensor boards, one of
+    them a VOC board. The VOC board reports its CO2 equivalent under the CO2
+    type and an available CO2 sensor as well, so a CO2 and a VOC board cannot
+    be told apart.
     """
     if not supports_sensor_status(device):
         return None
