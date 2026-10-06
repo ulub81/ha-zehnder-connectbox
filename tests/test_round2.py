@@ -292,20 +292,36 @@ def property_client(reject_optional=False):
             raise GatewayResponseError(2, None)
         return SimpleNamespace(body=b"")
 
+    def read_rooms():
+        sent.append("rooms")
+        return decode_rooms(role_message(1))
+
     session = SimpleNamespace(request=request)
     client._connected_session = lambda: session
-    client._read_rooms = lambda: decode_rooms(role_message(1))
+    client._read_rooms = read_rooms
     client.close = lambda: closed.append(True)
     return client, sent, closed
+
+
+OPTIONAL = ((38, 0, 9), (38, 0, 10), (38, 0, 11))
+
+
+def optional_requests(sent):
+    return [item for item in sent if item != "rooms" and item[1] in OPTIONAL]
 
 
 def test_optional_role_sequence_follows_main_sequence():
     client, sent, closed = property_client()
     rooms = decode_rooms(role_message(1))
     client._read_device_properties(rooms, include_filter_properties=True)
-    optional = [item for item in sent if item[1] in ((38, 0, 9), (38, 0, 10), (38, 0, 11))]
+    optional = optional_requests(sent)
     assert optional == [(0, (38, 0, 9)), (1, (38, 0, 10)), (2, (38, 0, 11))]
-    assert sent[-3:] == optional
+    # The core sequence is complete and read back before the optional one, and
+    # the room model is read once more afterwards.
+    first_optional = sent.index(optional[0])
+    assert "rooms" in sent[:first_optional]
+    assert all(item == "rooms" or item[1] not in OPTIONAL for item in sent[:first_optional])
+    assert sent[-4:] == [*optional, "rooms"]
     assert closed == []
 
 
@@ -315,7 +331,8 @@ def test_optional_role_sequence_only_with_slow_refresh():
     client._read_device_properties(rooms, include_filter_properties=True)
     sent.clear()
     client._read_device_properties(rooms, include_filter_properties=False)
-    assert all(item[1][2] not in (9, 10, 11) or item[1][:2] != (38, 0) for item in sent)
+    assert optional_requests(sent) == []
+    assert sent[-1] == "rooms"
 
 
 def test_rejected_optional_sequence_keeps_telemetry():
@@ -325,3 +342,28 @@ def test_rejected_optional_sequence_keeps_telemetry():
     assert closed == [True]
     assert result and result[0].room_id == 1
     assert (0, (25, 0, 1)) in sent
+    # The rooms read before the rejected sequence are returned.
+    assert sent.count("rooms") == 1
+
+
+def test_rejected_optional_sequence_is_not_requested_again():
+    client, sent, closed = property_client(reject_optional=True)
+    rooms = decode_rooms(role_message(1))
+    client._read_device_properties(rooms, include_filter_properties=True)
+    client._remember_device_properties(rooms)
+    sent.clear()
+    client._read_device_properties(rooms, include_filter_properties=True)
+    assert optional_requests(sent) == []
+    assert (0, (25, 0, 1)) in sent
+    assert closed == [True]
+
+
+def test_filter_reset_read_back_requests_no_optional_sequence():
+    client, sent, closed = property_client()
+    rooms = decode_rooms(role_message(1))
+    expected = {(7, (38, 0, 9)): b"\x3c"}
+    client._read_device_properties(
+        rooms, include_filter_properties=True, expected_property_values=expected
+    )
+    assert optional_requests(sent) == []
+    assert closed == []

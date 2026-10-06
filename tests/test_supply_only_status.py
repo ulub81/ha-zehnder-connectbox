@@ -132,11 +132,19 @@ def property_client(reject=()):
             raise GatewayResponseError(2, None)
         return SimpleNamespace(body=b"")
 
+    def read_rooms():
+        sent.append("rooms")
+        return decode_rooms(room_message())
+
     session = SimpleNamespace(request=request)
     client._connected_session = lambda: session
-    client._read_rooms = lambda: decode_rooms(room_message())
+    client._read_rooms = read_rooms
     client.close = lambda: closed.append(True)
     return client, sent, closed
+
+
+def fan_state_requests(sent):
+    return [item for item in sent if item != "rooms" and item[1] in FAN_STATE]
 
 
 @pytest.mark.parametrize("slow_refresh", [True, False])
@@ -147,19 +155,45 @@ def test_fan_state_sequence_is_read_with_every_refresh(slow_refresh):
     if not slow_refresh:
         sent.clear()
         client._read_device_properties(rooms, include_filter_properties=False)
-    fan_state = [item for item in sent if item[1] in FAN_STATE]
+    fan_state = fan_state_requests(sent)
     assert fan_state == [(0, FAN_STATE[0]), (1, FAN_STATE[1]), (2, FAN_STATE[2])]
+    # The core telemetry is read back before the fan state is requested, and
+    # the room model is read again afterwards.
+    first = sent.index(fan_state[0])
+    assert "rooms" in sent[:first]
+    assert sent[-1] == "rooms"
     assert closed == []
 
 
-def test_rejected_fan_state_sequence_keeps_telemetry_and_settings():
+def test_rejected_fan_state_sequence_keeps_telemetry():
     client, sent, closed = property_client(reject={(38, 0, 5)})
     rooms = decode_rooms(room_message())
     result = client._read_device_properties(rooms, include_filter_properties=True)
     assert closed == [True]
     assert result and result[0].room_id == 1
-    # The slowly changing settings are still requested afterwards.
+    assert (0, (25, 0, 1)) in sent
+    # The rooms read before the rejected sequence are returned.
+    assert sent.count("rooms") == 1
+
+    # The unit's fan state is not requested again; its settings are.
+    client._remember_device_properties(rooms)
+    sent.clear()
+    client._read_device_properties(rooms, include_filter_properties=True)
+    assert fan_state_requests(sent) == []
     assert (2, (38, 0, 11)) in sent
+    assert closed == [True]
+
+
+def test_filter_reset_read_back_requests_no_fan_state():
+    client, sent, closed = property_client()
+    rooms = decode_rooms(room_message())
+    client._read_device_properties(
+        rooms,
+        include_filter_properties=True,
+        expected_property_values={(1, (38, 0, 3)): b"\x60\x04"},
+    )
+    assert fan_state_requests(sent) == []
+    assert closed == []
 
 
 def test_no_fan_state_sequence_for_other_profiles():

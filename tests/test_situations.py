@@ -234,18 +234,37 @@ def test_situation_selects_only_for_present_situations():
 # --- client writes a given situation -------------------------------------------------
 
 
-def make_client(message):
+def make_client(message, *, apply_writes=True):
+    """A gateway whose room-value writes change the configured levels."""
     client = client_mod.ConnectBoxClient("192.0.2.1", uuid.uuid4(), uuid.uuid4(), "00" * 32)
-    rooms = decode_rooms(message)
+    (base,) = decode_rooms(message)
+    state = {"levels": {value.temperature_mode: value.level for value in base.ventilation}}
     session = SimpleNamespace(bodies=[])
-    session.request = lambda request, confirm, body=b"", **_kw: (
-        session.bodies.append(body) or SimpleNamespace(body=b"")
-    )
+
+    def request(request, confirm, body=b"", **_kw):
+        session.bodies.append(body)
+        if apply_writes:
+            state["levels"] = entries(body)
+        return SimpleNamespace(body=b"")
+
+    session.request = request
     reads = []
+
+    def read_rooms():
+        reads.append(1)
+        levels = tuple(state["levels"][mode] for mode in sorted(state["levels"]))
+        return decode_rooms(room_message(levels=levels))
+
     client._read_run_state = lambda: RunState(1, 0, False, 0, False, None, ())
-    client._read_rooms = lambda: (reads.append(1) or rooms)
+    client._read_rooms = read_rooms
     client._connected_session = lambda: session
     client.read_snapshot = lambda **_kw: "snapshot"
+    client.closed = 0
+
+    def close():
+        client.closed += 1
+
+    client.close = close
     return client, session, reads
 
 
@@ -257,11 +276,25 @@ def entries(body):
     }
 
 
-def test_client_writes_inactive_situation_without_waiting():
+def test_client_confirms_inactive_situation_by_read_back():
     client, session, reads = make_client(room_message(levels=(5, 5, 0, 1)))
     assert client.set_level(1, 3, 2) == "snapshot"
     assert entries(session.bodies[0]) == {0: 5, 1: 5, 2: 3, 3: 1}
-    assert len(reads) == 1  # no wait loop for a situation that is not active
+    # One read before the write and one that shows the configured level.
+    assert len(reads) == 2
+
+
+def test_client_reports_unconfirmed_inactive_situation(monkeypatch):
+    monkeypatch.setattr(client_mod, "LEVEL_SETTLE_TIMEOUT", 0.2)
+    monkeypatch.setattr(client_mod, "LEVEL_SETTLE_POLL_INTERVAL", 0.05)
+    client, session, reads = make_client(
+        room_message(levels=(5, 5, 0, 1)), apply_writes=False
+    )
+    with pytest.raises(client_mod.ProtocolError, match="configured situation level"):
+        client.set_level(1, 3, 2)
+    assert len(session.bodies) == 1
+    assert len(reads) > 2
+    assert client.closed == 1
 
 
 def test_client_rejects_unknown_situation():
