@@ -156,7 +156,7 @@ def test_fan_follows_local_change_to_level_4():
     entity = fan.ConnectBoxFan(
         FakeCoordinator(snapshot(room_message(configured=5, current=4))), DEVICE_ID
     )
-    assert entity.preset_mode == "Level 4"
+    assert entity.preset_mode == "level_4"
     assert entity.percentage == 100
     assert entity.is_on is True
 

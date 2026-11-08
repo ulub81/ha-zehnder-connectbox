@@ -50,7 +50,7 @@ from homeassistant.helpers.json import json_bytes  # noqa: E402
 
 ROOM_ID = 3
 DEVICE_ID = 17
-LEVEL_PRESETS = ["Level 1", "Level 2", "Level 3", "Level 4"]
+LEVEL_PRESETS = ["level_1", "level_2", "level_3", "level_4"]
 
 
 def _status(identity: tuple[int, int, int], value: int) -> PropertyValue:
@@ -290,7 +290,7 @@ def test_fan_offers_auto_with_board():
     entity, _ = make_fan(make_snapshot(2))
     assert entity.is_on is True
     assert entity.percentage == 50
-    assert entity.preset_mode == "Level 2"
+    assert entity.preset_mode == "level_2"
     assert entity.preset_modes == [*LEVEL_PRESETS, "auto"]
 
 
@@ -362,8 +362,8 @@ def test_turn_on_with_auto_preset():
 def test_percentage_and_level_presets_leave_sensor_mode():
     entity, coordinator = make_fan(make_snapshot(SENSOR_MODE_LEVEL))
     asyncio.run(entity.async_set_percentage(75))
-    assert entity.preset_mode == "Level 3"
-    asyncio.run(entity.async_handle_set_preset_mode_service("Level 4"))
+    assert entity.preset_mode == "level_3"
+    asyncio.run(entity.async_handle_set_preset_mode_service("level_4"))
     assert coordinator.calls == [("level", ROOM_ID, 3), ("level", ROOM_ID, 4)]
 
 
