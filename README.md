@@ -320,6 +320,7 @@ data:
 
 Before installing this integration:
 
+1. Home Assistant 2025.3 or newer.
 1. The ventilation unit must have a compatible wireless module installed.
 2. A Zehnder ConnectBox CU-RF-ZMA must be connected to the same local network
    as Home Assistant.

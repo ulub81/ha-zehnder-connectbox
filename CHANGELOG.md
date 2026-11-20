@@ -5,8 +5,18 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-20
+
+The remaining functions of the official app for ComfoSpot 50 systems, each
+checked against the app on a ConnectBox with six ComfoSpot 50 units; the
+firmware upload follows the app and is tested offline until a newer package
+is published.
+
 ### Added
 
+- Start and stop a room's boost and set its duration, set the runtime of
+  level 1 per hour and the summer ventilation role of a unit, and show its
+  bath function, automatic operation sensors and error log.
 - Add a fan status sensor per unit that shows what the unit is doing right
   now (central off, standby, level 1–4, sensor mode, boost, summer
   ventilation) with a matching icon, and carries the level, situation, fan
@@ -34,14 +44,23 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Require Home Assistant 2025.3 or newer; earlier versions lack the entity
+  setup type the integration already used.
 - Show the ventilation levels with numbered icons (1–4), clearly apart from
   the sensor-controlled `auto` preset.
 - **Breaking:** the ventilation presets are now `level_1` to `level_4` and
   `auto`, so the frontend shows them translated ("Stufe 1" …). Automations
   that call `fan.set_preset_mode` with `Level 1` to `Level 4` must be updated.
 
+### Removed
+
+- The test builds' property capture switches and the capture in the
+  diagnostics; their registry entries are deleted at setup.
+
 ### Fixed
 
+- Link the units to the ConnectBox on Home Assistant versions that do not
+  accept the device ID for the link.
 - Stop passing the deprecated `via_device` device information and use
   `UnitOfRatio.PARTS_PER_MILLION` for CO2, both removed in Home Assistant
   2027.8. The link to the ConnectBox is still set when devices are registered.
@@ -149,7 +168,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - ComfoSpot 50 filter-timer reset button with gateway acknowledgements, state
   readback, and documented dashboard confirmation.
 
-[Unreleased]: https://github.com/andyblenk/ha-zehnder-connectbox/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/ulub81/ha-zehnder-connectbox/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ulub81/ha-zehnder-connectbox/releases/tag/v0.4.0
 [0.3.1]: https://github.com/andyblenk/ha-zehnder-connectbox/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/andyblenk/ha-zehnder-connectbox/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/andyblenk/ha-zehnder-connectbox/releases/tag/v0.2.0
