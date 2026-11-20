@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -30,13 +31,20 @@ class ConnectBoxSession:
     """A single blocking request session."""
 
     def __init__(
-        self, transport: ConnectBoxTransport, gateway_uuid: UUID, app_uuid: UUID
+        self,
+        transport: ConnectBoxTransport,
+        gateway_uuid: UUID,
+        app_uuid: UUID,
+        *,
+        on_unsolicited: Callable[[Operation, bytes], None] | None = None,
     ) -> None:
         self._transport = transport
         self._gateway_uuid = gateway_uuid
         self._app_uuid = app_uuid
         self._reference = 0
         self._buffer = b""
+        # Temporary capture build: told about frames that answer no request.
+        self._on_unsolicited = on_unsolicited
 
     def request(
         self,
@@ -70,6 +78,8 @@ class ConnectBoxSession:
             except ProtobufDecodeError as err:
                 raise ProtocolError("invalid operation envelope") from err
             if response_operation.reference != reference:
+                if self._on_unsolicited is not None:
+                    self._on_unsolicited(response_operation, received.body)
                 continue
             if response_operation.type != confirmation_type:
                 raise ProtocolError("gateway returned an unexpected confirmation")

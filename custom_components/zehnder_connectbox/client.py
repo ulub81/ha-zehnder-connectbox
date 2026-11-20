@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from uuid import UUID, uuid4
 
 from .const import (
@@ -28,15 +29,23 @@ from .models import (
     VersionInfo,
 )
 from .profiles import (
+    BOOST_DURATION_MAXIMUM,
+    BOOST_DURATION_MINIMUM,
+    BOOST_DURATION_STEP,
+    SUMMER_VENTILATION_ROLE,
+    SUMMER_VENTILATION_ROLES,
     PropertySpec,
     is_supported,
     fan_state_property_specs_for_device,
     optional_property_specs_for_device,
     property_specs_for_device,
+    supports_boost_candidates,
     supports_sensor_mode,
     supports_summer_ventilation,
 )
 from .protocol import (
+    ROOM_BOOST_DURATION,
+    Operation,
     OperationType,
     PropertySequenceCommand,
     ProtocolError,
@@ -50,6 +59,7 @@ from .protocol import (
     encode_property_request,
     encode_property_update,
     encode_room_level,
+    encode_room_number_update,
     encode_run_state,
     encode_summer_ventilation_settings,
 )
@@ -69,6 +79,34 @@ SITUATION_LOCATIONS = {
     TemperatureMode.AWAKE: 1,
     TemperatureMode.AWAY: 2,
 }
+# Temporary capture build (see profiles.CAPTURE_PROPERTY_GROUPS).
+CAPTURE_REQUEST_TIMEOUT = 3.0
+CAPTURE_SETTLE_TIMEOUT = 15.0
+CAPTURE_POLL_INTERVAL = 0.5
+type CaptureGroups = tuple[tuple[tuple[int, int, int], ...], ...]
+
+
+def capture_value(raw: bytes) -> dict[str, int | str]:
+    """Show short property values only; longer ones may contain text."""
+    if len(raw) > 4:
+        return {"length": len(raw)}
+    return {"hex": raw.hex(), "uint_le": int.from_bytes(raw, "little")}
+
+
+# Temporary capture build: frames without a matching request, per operation
+# type. Only the latest bodies of a type are kept.
+UNSOLICITED_TYPE_LIMIT = 64
+UNSOLICITED_SAMPLES = 3
+
+
+@dataclass(slots=True)
+class UnsolicitedFrames:
+    """Count and latest frames of one unsolicited operation type."""
+
+    count: int = 0
+    last: deque[tuple[float, int | None, int | None, bytes]] = field(
+        default_factory=lambda: deque(maxlen=UNSOLICITED_SAMPLES)
+    )
 
 
 class PairingError(ConnectionError):
@@ -101,6 +139,8 @@ class ConnectBoxClient:
         self._fully_requested_devices: set[tuple[int, int, int | None]] = set()
         self._rejected_optional_devices: set[tuple[int, int, int | None]] = set()
         self._rejected_fan_state_devices: set[tuple[int, int, int | None]] = set()
+        # Temporary capture build (see _record_unsolicited).
+        self.unsolicited_frames: dict[int, UnsolicitedFrames] = {}
 
     @classmethod
     def pair(
@@ -523,6 +563,234 @@ class ConnectBoxClient:
             self.close()
             raise
 
+    def set_summer_ventilation_role(
+        self, device_id: int, property_key: PropertyKey, role: int
+    ) -> GatewaySnapshot:
+        """Write a unit's summer ventilation role and read it back.
+
+        The official app sets the role on the unit's settings page next to the
+        other single-room-unit properties. The role is written like the
+        filter runtime, as one device-property write with the key the gateway
+        reported, and is then requested again in its verified read sequence.
+        """
+        if property_key.value_identity != SUMMER_VENTILATION_ROLE.key:
+            raise ValueError("unexpected summer-role property")
+        if role not in SUMMER_VENTILATION_ROLES:
+            raise CommandValidationError("invalid_summer_role")
+
+        try:
+            if self._read_run_state().summer_ventilation:
+                raise CommandValidationError("summer_role_interval_active")
+            device = next(
+                (
+                    item
+                    for room in self._read_rooms()
+                    for item in room.devices
+                    if item.device_id == device_id
+                ),
+                None,
+            )
+            if device is None:
+                raise CommandValidationError("device_unavailable")
+            if not optional_property_specs_for_device(device):
+                raise CommandValidationError("summer_role_unsupported")
+            if property_key.product_type != device.product_type:
+                raise ProtocolError("summer-role property does not match the device")
+
+            expected = bytes((role,))
+            self._connected_session().request(
+                OperationType.SET_DEVICE_PROPERTIES_REQUEST,
+                OperationType.SET_DEVICE_PROPERTIES_CONFIRM,
+                encode_property_update(device_id, property_key, expected),
+            )
+            self._request_properties(
+                device, optional_property_specs_for_device(device)
+            )
+            deadline = time.monotonic() + COMMAND_SETTLE_TIMEOUT
+            while True:
+                rooms = self._read_rooms()
+                current = next(
+                    (
+                        item
+                        for room in rooms
+                        for item in room.devices
+                        if item.device_id == device_id
+                    ),
+                    None,
+                )
+                if (
+                    current is not None
+                    and current.property_bytes(SUMMER_VENTILATION_ROLE.key)
+                    == expected
+                ):
+                    # Keep the read-back value for the following snapshots.
+                    self._remember_device_properties(
+                        self._restore_device_properties(rooms)
+                    )
+                    break
+                if time.monotonic() >= deadline:
+                    raise ProtocolError(
+                        "gateway did not report the written summer ventilation role"
+                    )
+                time.sleep(LEVEL_SETTLE_POLL_INTERVAL)
+            return self.read_snapshot(refresh_properties=False)
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    def set_boost_duration(self, room_id: int, minutes: int) -> GatewaySnapshot:
+        """Temporary test build: write a room's boost duration and read it back.
+
+        The room is written back as read with only its boost duration
+        (field 22) changed. The app offers 15 to 120 minutes in steps of 15
+        on the room's settings page. Starting a boost is not attempted: a room
+        write with the end of the boost (field 18) did not start one.
+        """
+        if (
+            isinstance(minutes, bool)
+            or not isinstance(minutes, int)
+            or not BOOST_DURATION_MINIMUM <= minutes <= BOOST_DURATION_MAXIMUM
+            or minutes % BOOST_DURATION_STEP
+        ):
+            raise CommandValidationError("invalid_boost_duration")
+        try:
+            room = self._boost_room(room_id)
+            if room.boost_active(time.time()):
+                raise CommandValidationError("boost_active")
+            self._connected_session().request(
+                OperationType.SET_ROOM_REQUEST,
+                OperationType.SET_ROOM_CONFIRM,
+                encode_room_number_update(room, {ROOM_BOOST_DURATION: minutes}),
+            )
+            written = self._wait_for(
+                lambda: self._find_room(room_id),
+                lambda item: item is None or item.boost_duration == minutes,
+            )
+            if written is None or written.boost_duration != minutes:
+                raise ProtocolError("gateway did not report the written boost duration")
+            return self.read_snapshot(refresh_properties=False)
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    def _find_room(self, room_id: int) -> Room | None:
+        """Read the rooms and return one of them."""
+        return next(
+            (item for item in self._read_rooms() if item.room_id == room_id), None
+        )
+
+    def _boost_room(self, room_id: int) -> Room:
+        """Return a room whose boost may be written in the test build."""
+        room = self._find_room(room_id)
+        if room is None:
+            raise CommandValidationError("room_unavailable")
+        if not any(
+            supports_boost_candidates(room, device) for device in room.devices
+        ):
+            raise CommandValidationError("boost_unsupported")
+        return room
+
+    def capture(
+        self,
+        targets: tuple[tuple[int, int, CaptureGroups], ...],
+        *,
+        deadline: float,
+    ) -> tuple[RunState, tuple[Room, ...], dict[int, dict[str, object]]]:
+        """Temporary capture build: read app properties and a fresh state once.
+
+        Only read requests are sent. Each target is (device ID, product type,
+        groups) and each group is one bounded read sequence, so a rejected
+        group does not affect the others. The values are collected from the
+        room model, which is returned together with a fresh run state.
+        """
+        wanted = {
+            device_id: {key for group in groups for key in group}
+            for device_id, _product_type, groups in targets
+        }
+        errors: dict[int, list[str]] = {device_id: [] for device_id in wanted}
+
+        def label(key: tuple[int, int, int]) -> str:
+            return ".".join(str(part) for part in key)
+
+        for device_id, product_type, groups in targets:
+            for group in groups:
+                group_label = ",".join(label(key) for key in group)
+                if time.monotonic() >= deadline:
+                    errors[device_id].append(f"{group_label}: skipped, time budget")
+                    continue
+                last = len(group) - 1
+                try:
+                    session = self._connected_session()
+                    for index, key in enumerate(group):
+                        if index == 0:
+                            command = PropertySequenceCommand.START
+                        elif index == last:
+                            command = PropertySequenceCommand.FINISH
+                        else:
+                            command = PropertySequenceCommand.CONTINUE
+                        session.request(
+                            OperationType.DEVICE_PROPERTIES_REQUEST,
+                            OperationType.DEVICE_PROPERTIES_CONFIRM,
+                            encode_property_request(
+                                command,
+                                device_id,
+                                PropertyKey(product_type, 255, 0, *key),
+                            ),
+                            timeout=CAPTURE_REQUEST_TIMEOUT,
+                        )
+                except (ProtocolError, TransportError) as err:
+                    errors[device_id].append(
+                        f"{group_label}: {type(err).__name__}: {err}"
+                    )
+                    self.close()
+
+        found: dict[int, dict[tuple[int, int, int], bytes]] = {
+            device_id: {} for device_id in wanted
+        }
+        settle_deadline = min(deadline, time.monotonic() + CAPTURE_SETTLE_TIMEOUT)
+        try:
+            while True:
+                rooms = self._read_rooms()
+                for room in rooms:
+                    for device in room.devices:
+                        keys = wanted.get(device.device_id)
+                        if keys is None:
+                            continue
+                        for value in device.properties:
+                            identity = value.key.value_identity
+                            if identity in keys and value.value:
+                                found[device.device_id][identity] = value.value
+                complete = all(
+                    len(found[device_id]) == len(keys)
+                    for device_id, keys in wanted.items()
+                )
+                if complete or time.monotonic() >= settle_deadline:
+                    break
+                time.sleep(CAPTURE_POLL_INTERVAL)
+            run_state = self._read_run_state()
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+        return (
+            run_state,
+            rooms,
+            {
+                device_id: {
+                    "values": {
+                        label(identity): capture_value(raw)
+                        for identity, raw in sorted(found[device_id].items())
+                    },
+                    "missing": [
+                        label(identity)
+                        for identity in sorted(keys - found[device_id].keys())
+                    ],
+                    "errors": errors[device_id],
+                }
+                for device_id, keys in wanted.items()
+            },
+        )
+
     def close(self) -> None:
         """Close the shared transport."""
         if self._transport is not None:
@@ -540,8 +808,31 @@ class ConnectBoxClient:
         )
         transport.connect()
         self._transport = transport
-        self._session = ConnectBoxSession(transport, self.gateway_uuid, self._app_uuid)
+        self._session = ConnectBoxSession(
+            transport,
+            self.gateway_uuid,
+            self._app_uuid,
+            on_unsolicited=self._record_unsolicited,
+        )
         return self._session
+
+    def _record_unsolicited(self, operation: Operation, body: bytes) -> None:
+        """Temporary capture build: keep frames that answer no request.
+
+        The session skips them. Their operation type and the latest bodies are
+        kept in memory only and shown by structure in the diagnostics capture,
+        to see what the gateway reports while the official app changes
+        something, such as starting a boost.
+        """
+        entry = self.unsolicited_frames.get(operation.type)
+        if entry is None:
+            if len(self.unsolicited_frames) >= UNSOLICITED_TYPE_LIMIT:
+                return
+            entry = self.unsolicited_frames[operation.type] = UnsolicitedFrames()
+        entry.count += 1
+        entry.last.append(
+            (time.time(), operation.reference, operation.result, bytes(body))
+        )
 
     def _read_version(self) -> VersionInfo:
         response = self._connected_session().request(

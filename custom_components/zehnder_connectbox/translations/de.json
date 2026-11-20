@@ -205,6 +205,14 @@
           "antifreeze": "Frostschutz",
           "override": "Vorübergehend geändert"
         }
+      },
+      "summer_ventilation_role": {
+        "name": "Rolle Sommerlüftung",
+        "state": {
+          "supply_and_exhaust": "Zu- und Abluft",
+          "supply": "Zuluft",
+          "exhaust": "Abluft"
+        }
       }
     },
     "sensor": {
@@ -325,6 +333,9 @@
     "number": {
       "summer_ventilation_duration": {
         "name": "Sommerlüftungsdauer"
+      },
+      "boost_duration": {
+        "name": "Stoßlüftungsdauer (Test)"
       }
     }
   },
@@ -388,6 +399,27 @@
     },
     "filter_runtime_unavailable": {
       "message": "Die Filterlaufzeit ist nicht verfügbar. Warte auf aktualisierte Messwerte, bevor du den Filtertimer zurücksetzt."
+    },
+    "invalid_summer_role": {
+      "message": "Wähle als Rolle für die Sommerlüftung Zu- und Abluft, Zuluft oder Abluft."
+    },
+    "summer_role_interval_active": {
+      "message": "Die Rolle für die Sommerlüftung kann nicht geändert werden, solange ein Sommerlüftungsintervall läuft."
+    },
+    "summer_role_unsupported": {
+      "message": "Das Ändern der Rolle für die Sommerlüftung wird für dieses Lüftungsgerät nicht unterstützt."
+    },
+    "summer_role_unavailable": {
+      "message": "Das Lüftungsgerät meldet seine Rolle für die Sommerlüftung derzeit nicht."
+    },
+    "invalid_boost_duration": {
+      "message": "Wähle für die Stoßlüftungsdauer einen Wert zwischen 15 und 120 Minuten in 15-Minuten-Schritten."
+    },
+    "boost_active": {
+      "message": "Die Stoßlüftungsdauer kann nicht geändert werden, solange eine Stoßlüftung läuft."
+    },
+    "boost_unsupported": {
+      "message": "Die Stoßlüftung ist für diesen Raum nicht verfügbar."
     },
     "command_rejected": {
       "message": "Die ConnectBox hat den Befehl abgelehnt. Prüfe den Betriebszustand und die Einstellungen in der App."

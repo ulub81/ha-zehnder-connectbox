@@ -19,6 +19,7 @@ from homeassistant.exceptions import (
 )
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .client import ConnectBoxClient
 from .const import (
@@ -30,8 +31,17 @@ from .const import (
     PROPERTY_REFRESH_INTERVAL,
 )
 from .errors import CommandValidationError
-from .models import GatewaySnapshot, RunMode
-from .profiles import FILTER_RUNTIME, format_version, product_name
+from .models import GatewaySnapshot, Room, RunMode, RunState
+from .profiles import (
+    CANDIDATE_WRITE_LOG_SIZE,
+    CAPTURE_PROPERTY_GROUPS,
+    CAPTURE_TIME_BUDGET,
+    FILTER_RUNTIME,
+    format_version,
+    product_name,
+    summer_ventilation_role_key,
+    supports_sensor_status,
+)
 from .protocol import ProtocolError
 from .session import GatewayResponseError
 from .transport import CertificateMismatchError, TransportError
@@ -63,6 +73,9 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         self._failures = 0
         self._last_non_off_mode = RunMode.MANUAL
         self._io_lock = asyncio.Lock()
+        # Temporary test build: outcome of the boost candidate writes, shown
+        # in the diagnostics capture.
+        self.candidate_writes: list[dict[str, object]] = []
 
     async def _async_update_data(self) -> GatewaySnapshot:
         now = time.monotonic()
@@ -183,6 +196,119 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         self._last_property_refresh = time.monotonic()
         self._last_filter_property_refresh = self._last_property_refresh
         self._accept_command_snapshot(snapshot)
+
+    async def async_set_summer_ventilation_role(
+        self, device_id: int, role: int
+    ) -> None:
+        """Write a unit's summer ventilation role and confirm it."""
+        data = self.data.find_device(device_id) if self.data is not None else None
+        if data is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="device_unavailable"
+            )
+        key = summer_ventilation_role_key(data[1])
+        if key is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="summer_role_unavailable"
+            )
+        snapshot = await self._async_execute_command(
+            partial(self.client.set_summer_ventilation_role, device_id, key, role)
+        )
+        self._accept_command_snapshot(snapshot)
+
+    async def async_set_boost_duration(self, room_id: int, minutes: int) -> None:
+        """Temporary test build: write a room's boost duration and log it."""
+        await self._async_boost_candidate(
+            room_id,
+            "boost_duration",
+            minutes,
+            partial(self.client.set_boost_duration, room_id, minutes),
+        )
+
+    async def _async_boost_candidate(
+        self,
+        room_id: int,
+        write: str,
+        value: int,
+        command: Callable[[], GatewaySnapshot],
+    ) -> None:
+        """Temporary test build: run a boost candidate write and log its outcome.
+
+        The log is listed in the diagnostics capture under candidate_writes,
+        with the gateway's answer and the boost values it reports afterwards.
+        """
+        record: dict[str, object] = {
+            "at": dt_util.utcnow().isoformat(timespec="seconds"),
+            "room": room_id,
+            "write": write,
+            "value": value,
+            "result": "pending",
+        }
+        self.candidate_writes.append(record)
+        del self.candidate_writes[:-CANDIDATE_WRITE_LOG_SIZE]
+        try:
+            snapshot = await self._async_execute_command(command)
+        except HomeAssistantError as err:
+            cause = err.__cause__
+            if isinstance(cause, GatewayResponseError):
+                record["result"] = f"rejected: result {cause.result}: {cause}"
+            elif cause is not None:
+                record["result"] = f"{type(cause).__name__}: {cause}"
+            else:
+                record["result"] = type(err).__name__
+            raise
+        record["result"] = "confirmed"
+        room = next(
+            (item for item in snapshot.rooms if item.room_id == room_id), None
+        )
+        if room is not None:
+            record["read_back"] = {
+                "boost_duration": room.boost_duration,
+                "boost_ends_in_seconds": (
+                    room.boost_until - int(time.time())
+                    if room.boost_until
+                    else None
+                ),
+            }
+        self._accept_command_snapshot(snapshot)
+
+    async def async_capture(
+        self,
+    ) -> tuple[RunState, tuple[Room, ...], dict[int, dict[str, object]]]:
+        """Temporary capture build: read app properties and a fresh state.
+
+        Used only when the diagnostics are downloaded. The app's properties are
+        requested for every ComfoSpot 50; nothing is written.
+        """
+        snapshot = self.data
+        devices = (
+            [device for room in snapshot.rooms for device in room.devices]
+            if snapshot is not None
+            else []
+        )
+        targets = tuple(
+            (device.device_id, device.product_type, CAPTURE_PROPERTY_GROUPS)
+            for device in devices
+            if supports_sensor_status(device)
+        )
+        deadline = time.monotonic() + CAPTURE_TIME_BUDGET
+        async with self._io_lock:
+            return await self.hass.async_add_executor_job(
+                partial(self.client.capture, targets, deadline=deadline)
+            )
+
+    async def async_unsolicited_frames(
+        self,
+    ) -> dict[int, tuple[int, tuple[tuple[float, int | None, int | None, bytes], ...]]]:
+        """Temporary capture build: copy the frames that answered no request.
+
+        Taken under the I/O lock, so no request adds a frame meanwhile.
+        """
+        async with self._io_lock:
+            return {
+                operation_type: (entry.count, tuple(entry.last))
+                for operation_type, entry in self.client.unsolicited_frames.items()
+            }
 
     async def async_close(self) -> None:
         """Close the client outside Home Assistant's event loop."""

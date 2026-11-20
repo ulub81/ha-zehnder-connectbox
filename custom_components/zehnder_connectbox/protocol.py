@@ -215,7 +215,8 @@ def decode_version(message: bytes) -> VersionInfo:
 def decode_run_state(message: bytes) -> RunState:
     """Decode the current system state."""
     outer = decode_fields(message)
-    fields = decode_fields(_required_bytes(outer, 1, "run state"))
+    inner = _required_bytes(outer, 1, "run state")
+    fields = decode_fields(inner)
     standby = uint_value(fields, 7)
     summer = uint_value(fields, 12)
     return RunState(
@@ -226,6 +227,7 @@ def decode_run_state(message: bytes) -> RunState:
         summer_ventilation=bool(summer) if summer is not None else None,
         summer_ventilation_end=uint_value(fields, 13),
         errors=uint_values(fields, 11),
+        raw=inner,
     )
 
 
@@ -429,6 +431,49 @@ def encode_filter_reset_room(room: Room, device_id: int) -> bytes:
 
     if not device_found:
         raise ProtocolError("device is no longer attached to this room")
+    return encode_bytes(1, bytes(room_value))
+
+
+def encode_room_number_update(room: Room, values: dict[int, int]) -> bytes:
+    """Temporary test build: write a room back with number fields changed.
+
+    The room is sent as read, without the device fields 30, 31, and 41 that
+    the official client leaves out of a room write, and without a filter
+    acknowledgement. Only the given top-level number fields change; a field
+    the gateway did not report is added in field-number order.
+    """
+    if not room.raw:
+        raise ProtocolError("room does not contain its original gateway data")
+    if not values:
+        raise ValueError("no room field to change")
+    for number, value in values.items():
+        if number in (1, 2, 3, 8, 19, 101) or number < 1:
+            raise ValueError("this room field cannot be changed as a number")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("room field values must be non-negative integers")
+
+    pending = dict(sorted(values.items()))
+    room_value = bytearray()
+    for field in decode_fields(room.raw):
+        for number in [item for item in pending if item < field.number]:
+            room_value.extend(encode_uint(number, pending.pop(number)))
+        if field.number in pending:
+            if field.wire_type is not WireType.VARINT:
+                raise ProtocolError("the room field is not a number")
+            room_value.extend(encode_uint(field.number, pending.pop(field.number)))
+            continue
+        if field.number in values and field.wire_type is WireType.VARINT:
+            continue  # a repeated occurrence of a field that was replaced
+        if field.number == 8 and field.wire_type is WireType.BYTES:
+            device_fields = decode_fields(bytes(field.value))
+            writable_fields = tuple(
+                item for item in device_fields if item.number not in (30, 31, 41)
+            )
+            room_value.extend(encode_bytes(8, _encode_fields(writable_fields)))
+            continue
+        room_value.extend(_encode_field(field))
+    for number, value in pending.items():
+        room_value.extend(encode_uint(number, value))
     return encode_bytes(1, bytes(room_value))
 
 

@@ -91,6 +91,39 @@ OPTIONAL_PROPERTY_SPECS = (
     SUMMER_VENTILATION_ROLE,
 )
 
+SUMMER_VENTILATION_ROLE_VALUES = {
+    name: value for value, name in SUMMER_VENTILATION_ROLES.items()
+}
+
+# Temporary test build: boost of a room. The app offers a duration of 15 to
+# 120 minutes per room in steps of 15 and starts and stops the boost on its
+# ventilation page. Only the room fields that show the result are known
+# (protocol.ROOM_BOOST_UNTIL and ROOM_BOOST_DURATION), so the writes are
+# candidates whose outcome is listed in the diagnostics capture.
+BOOST_DURATION_MINIMUM = 15
+BOOST_DURATION_MAXIMUM = 120
+BOOST_DURATION_STEP = 15
+CANDIDATE_WRITE_LOG_SIZE = 20
+
+# Temporary capture build: properties that the official app reads from
+# ComfoSpot 50 units, read once per diagnostics download. The app's device
+# page shows the bath function, the runtime of level 1 per hour, the summer
+# ventilation role, the automatic operating mode and three operating-hour
+# counters; the capture is used to match them to these properties. Each group
+# is one bounded read sequence, so a rejected group does not affect the
+# others.
+CAPTURE_PROPERTY_GROUPS: tuple[tuple[tuple[int, int, int], ...], ...] = (
+    ((38, 0, 5), (38, 0, 6), (38, 0, 8)),
+    ((38, 0, 9), (38, 0, 10), (38, 0, 11)),
+    ((38, 0, 13), (38, 0, 14)),
+    ((38, 0, 18), (38, 0, 19)),
+    ((38, 1, 5), (38, 1, 6)),
+    ((38, 1, 18), (38, 1, 19)),
+    ((36, 0, 3), (36, 0, 4)),
+    ((36, 1, 3), (36, 1, 4)),
+)
+CAPTURE_TIME_BUDGET = 40.0
+
 # Sensor types in a unit's sensor list (device field 8 of the room model).
 SENSOR_TYPE_TEMPERATURE = 1
 SENSOR_TYPE_HUMIDITY = 2
@@ -185,6 +218,29 @@ def summer_ventilation_role(device: AttachedDevice) -> str | None:
         return None
     value = SUMMER_VENTILATION_ROLE.value(device)
     return SUMMER_VENTILATION_ROLES.get(value) if value is not None else None
+
+
+def summer_ventilation_role_key(device: AttachedDevice) -> PropertyKey | None:
+    """Return the key under which the unit reports its role, for a write.
+
+    The role is written with the key the gateway reported it under, like the
+    filter runtime, and only for a unit that reports a known role.
+    """
+    if summer_ventilation_role(device) is None:
+        return None
+    for prop in device.properties:
+        if prop.key.value_identity == SUMMER_VENTILATION_ROLE.key and prop.value:
+            return prop.key
+    return None
+
+
+def supports_boost_candidates(room: Room, device: AttachedDevice) -> bool:
+    """Temporary test build: limit the boost writes to checked rooms.
+
+    The room must report its boost duration, and the unit must be a
+    ComfoSpot 50, the profile on which the boost fields were observed.
+    """
+    return supports_sensor_status(device) and room.boost_duration is not None
 
 
 def sensor_available(device: AttachedDevice, status_spec: PropertySpec) -> bool | None:
