@@ -86,6 +86,7 @@ COMMAND_SETTLE_TIMEOUT = 10.0
 BOOST_END_TOLERANCE = 300
 SCHEDULES_REFRESH_INTERVAL = 15 * 60.0
 SCHEDULES_REQUEST_TIMEOUT = 4.0
+SCHEDULES_RETRY_INTERVAL = 60.0
 TEST_REQUEST_TIMEOUT = 6.0
 # Slow sequences read with the filter refresh, each in its own sequence after
 # the optional settings, so a unit that rejects one keeps its other telemetry.
@@ -1036,6 +1037,11 @@ class ConnectBoxClient:
         now = time.monotonic()
         if self._schedules_unsupported or now < self._schedules_retry_after:
             return cached
+        if self._session is None:
+            # The connection was just closed, for example after a unit
+            # rejected an optional sequence. The gateway may refuse a new
+            # connection right away, so read the list with the next poll.
+            return cached
         day_plan = run_state.day_plan
         fresh = (
             cached is not None
@@ -1062,9 +1068,9 @@ class ConnectBoxClient:
             self._schedules = None
             self.close()
             return None
-        except ProtocolError:
+        except (ProtocolError, TransportError):
             # No usable answer in time: keep the last list and try again later.
-            self._schedules_retry_after = now + SCHEDULES_REFRESH_INTERVAL
+            self._schedules_retry_after = now + SCHEDULES_RETRY_INTERVAL
             self.close()
             return cached
         self._schedules_read = now

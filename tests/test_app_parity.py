@@ -1263,8 +1263,28 @@ class ScheduleListTests(unittest.TestCase):
                 raise answer
             return SimpleNamespace(body=answer)
 
-        client._connected_session = lambda: SimpleNamespace(request=request)
+        session = SimpleNamespace(request=request)
+        client._session = session
+        client._connected_session = lambda: session
         return client, requests
+
+    def test_list_waits_for_the_next_poll_after_a_closed_connection(self):
+        client, requests = self.make_client([schedules_message()])
+        client._session = None
+        self.assertIsNone(client._read_schedules(self.state()))
+        self.assertEqual(requests, [])
+
+    def test_refused_connection_does_not_fail_the_snapshot(self):
+        client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
+        client.close = Mock()
+        client._session = SimpleNamespace()
+
+        def refuse():
+            raise client_mod.TransportError("unable to establish a connection")
+
+        client._connected_session = refuse
+        self.assertIsNone(client._read_schedules(self.state()))
+        self.assertGreater(client._schedules_retry_after, 0)
 
     def state(self, week_plan=3, day_plan=1):
         return decode_run_state(run_state_message(week_plan=week_plan, day_plan=day_plan))
