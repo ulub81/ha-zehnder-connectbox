@@ -760,7 +760,7 @@ class UnsolicitedFrameTests(unittest.TestCase):
         update = b"".join(
             (
                 encode_uint(1, 3),
-                encode_uint(2, 220),
+                encode_uint(2, 100),
                 encode_uint(7, 0),
                 encode_uint(8, 1),
                 encode_uint(11, 1795204800),
@@ -773,7 +773,7 @@ class UnsolicitedFrameTests(unittest.TestCase):
         )
         self.assertEqual(
             shown["207"]["last"][0]["body"],
-            {"f1": {"f1": 3, "f2": 220, "f7": 0, "f8": 1, "f11": 1795204800, "f14": 5}},
+            {"f1": {"f1": 3, "f2": 100, "f7": 0, "f8": 1, "f11": 1795204800, "f14": 5}},
         )
 
     def test_diagnostics_show_an_empty_body_as_none(self):
