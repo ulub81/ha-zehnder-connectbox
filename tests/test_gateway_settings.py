@@ -12,10 +12,10 @@ from test_app_parity import (
     GATEWAY,
     FakeCoordinator,
     rooms_message,
-    run_state_message,
     set_up,
     snapshot,
 )
+from test_schedules_absence import run_state_message
 
 from custom_components.zehnder_connectbox import client as client_mod
 from custom_components.zehnder_connectbox import select, sensor, switch, text

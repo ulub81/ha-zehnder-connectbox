@@ -15,10 +15,7 @@ from test_app_parity import (
     APP,
     GATEWAY,
     FakeCoordinator,
-    day_plan_message,
     rooms_message,
-    run_state_message,
-    schedules_message,
     set_up,
     snapshot,
 )
@@ -26,6 +23,7 @@ from test_app_parity import (
 from custom_components.zehnder_connectbox import (
     binary_sensor,
     select,
+    sensor,
     services,
     switch,
 )
@@ -47,6 +45,8 @@ from custom_components.zehnder_connectbox.protobuf import (
     uint_value,
 )
 from custom_components.zehnder_connectbox.protocol import (
+    Frame,
+    Operation,
     OperationType,
     ProtocolError,
     decode_day_plan_confirm,
@@ -59,7 +59,10 @@ from custom_components.zehnder_connectbox.protocol import (
     encode_standby_time_range,
     encode_week_plan,
 )
-from custom_components.zehnder_connectbox.session import GatewayResponseError
+from custom_components.zehnder_connectbox.session import (
+    ConnectBoxSession,
+    GatewayResponseError,
+)
 
 ABSENCE_START = 1796408100  # 04.12.2026 19:15 CET
 ABSENCE_END = 1796494500  # 05.12.2026 19:15 CET
@@ -73,6 +76,392 @@ def absence_state(*, planned, start=ABSENCE_START, end=ABSENCE_END, week_plan=3)
     if planned:
         inner += encode_uint(9, start) + encode_uint(10, end)
     return encode_bytes(1, inner)
+
+
+class FakeTransport:
+    def __init__(self, frames):
+        self.pending = list(frames)
+        self.written = []
+
+    def set_timeout(self, _timeout):
+        pass
+
+    def write(self, data):
+        self.written.append(data)
+
+    def read(self):
+        return self.pending.pop(0)
+
+
+def gateway_frame(operation, body=b""):
+    return Frame(GATEWAY, APP, operation.encode(), body).encode()
+
+
+class SessionTests(unittest.TestCase):
+    def test_exchange_returns_any_answer_unchecked(self):
+        transport = FakeTransport(
+            [gateway_frame(Operation(type=777, result=5, reference=1), b"\x08\x01")]
+        )
+        session = ConnectBoxSession(transport, GATEWAY, APP)
+        response = session.exchange(776)
+        self.assertEqual(
+            (response.operation.type, response.operation.result, response.body),
+            (777, 5, b"\x08\x01"),
+        )
+
+    def test_request_still_checks_type_and_result(self):
+        for operation, error in (
+            (Operation(type=777, reference=1), ProtocolError),
+            (Operation(type=195, result=3, reference=1), GatewayResponseError),
+        ):
+            with self.subTest(operation=operation):
+                session = ConnectBoxSession(
+                    FakeTransport([gateway_frame(operation)]), GATEWAY, APP
+                )
+                with self.assertRaises(error):
+                    session.request(194, 195)
+
+
+class NotificationTests(unittest.TestCase):
+    def test_session_reports_frames_that_answer_no_request(self):
+        seen = []
+        transport = FakeTransport(
+            [
+                gateway_frame(Operation(type=207), b"\x08\x03"),
+                gateway_frame(Operation(type=195, reference=1), b"answer"),
+            ]
+        )
+        session = ConnectBoxSession(
+            transport,
+            GATEWAY,
+            APP,
+            on_unsolicited=lambda operation, body: seen.append((operation.type, body)),
+        )
+        response = session.request(194, 195)
+        self.assertEqual(response.body, b"answer")
+        self.assertEqual(seen, [(207, b"\x08\x03")])
+
+    def test_session_still_skips_them_without_a_listener(self):
+        transport = FakeTransport(
+            [
+                gateway_frame(Operation(type=207), b"\x08\x03"),
+                gateway_frame(Operation(type=195, reference=1), b"answer"),
+            ]
+        )
+        session = ConnectBoxSession(transport, GATEWAY, APP)
+        self.assertEqual(session.request(194, 195).body, b"answer")
+
+
+def run_state_message(
+    *,
+    week_plan=3,
+    day_plan=1,
+    slots=((0, 1), (480, 0), (1260, 1)),
+    name=b"Wintertagesplan",
+):
+    plan = encode_uint(1, day_plan) + encode_bytes(2, name)
+    for minute, mode in slots:
+        slot = (encode_uint(1, minute) if minute else b"") + (
+            encode_uint(2, mode) if mode else b""
+        )
+        plan += encode_bytes(3, slot)
+    inner = b"".join(
+        (
+            encode_uint(1, 1),
+            encode_uint(2, 0),
+            encode_uint(3, 1),
+            encode_bytes(4, plan),
+            encode_uint(5, day_plan),
+            encode_uint(6, week_plan),
+            encode_uint(12, 0),
+        )
+    )
+    return encode_bytes(1, inner)
+
+
+class ScheduleProtocolTests(unittest.TestCase):
+    def test_run_state_reports_week_and_day_plan(self):
+        state = decode_run_state(run_state_message())
+        self.assertEqual(state.week_plan, 3)
+        self.assertEqual(state.day_plan.plan_id, 1)
+        self.assertEqual(state.day_plan.name, "Wintertagesplan")
+        self.assertEqual(state.day_plan.slots, ((0, 1), (480, 0), (1260, 1)))
+        summer = decode_run_state(
+            run_state_message(
+                week_plan=1, day_plan=2, slots=((0, 1), (480, 2), (1350, 0))
+            )
+        )
+        self.assertEqual(
+            (summer.week_plan, summer.day_plan.plan_id, summer.day_plan.slots[1]),
+            (1, 2, (480, 2)),
+        )
+
+    def test_run_state_without_plan(self):
+        inner = encode_uint(1, 2) + encode_uint(2, 0)
+        state = decode_run_state(encode_bytes(1, inner))
+        self.assertIsNone(state.week_plan)
+        self.assertIsNone(state.day_plan)
+
+
+# --- schedule list ----------------------------------------------------------------
+
+
+def day_plan_message(plan_id, name, slots, functions=()):
+    plan = encode_uint(1, plan_id) + encode_string(2, name)
+    for minute, mode in slots:
+        plan += encode_bytes(3, encode_uint(1, minute) + encode_uint(2, mode))
+    for start, function, duration, room_id in functions:
+        plan += encode_bytes(
+            20,
+            b"".join(
+                (
+                    encode_uint(1, start),
+                    encode_uint(2, function),
+                    encode_uint(3, duration),
+                    encode_uint(4, room_id),
+                    encode_uint(5, 0),
+                )
+            ),
+        )
+    return encode_bytes(1, plan)
+
+
+def week_plan_message(plan_id, name, day_plan):
+    plan = encode_uint(1, plan_id) + encode_string(2, name)
+    for field_number in range(3, 10):
+        plan += encode_uint(field_number, day_plan)
+    return encode_bytes(2, plan)
+
+
+def schedules_message(*, extra_day=()):
+    """The schedule list in the shape the gateway reported."""
+    return b"".join(
+        (
+            day_plan_message(1, "Wintertagesplan", ((0, 1), (480, 0), (1260, 1))),
+            day_plan_message(
+                2,
+                "Sommertagesplan",
+                ((0, 1), (480, 2), (1350, 0)),
+                tuple((minute, 5, 60, 0) for minute in (270, 210, 150, 90, 30)),
+            ),
+            *extra_day,
+            week_plan_message(1, "Sommerwochenplan", 2),
+            week_plan_message(3, "Winterwochenplan", 1),
+        )
+    )
+
+
+class ScheduleListTests(unittest.TestCase):
+    def test_decodes_day_and_week_plans_with_functions(self):
+        test_plan = day_plan_message(
+            3, "Test", ((0, 1), (420, 0), (510, 2)), ((420, 2, 20, 3),)
+        )
+        schedules = decode_schedules(schedules_message(extra_day=(test_plan,)))
+        self.assertEqual([plan.plan_id for plan in schedules.day_plans], [1, 2, 3])
+        self.assertEqual(
+            [(plan.plan_id, plan.name) for plan in schedules.week_plans],
+            [(1, "Sommerwochenplan"), (3, "Winterwochenplan")],
+        )
+        self.assertEqual(schedules.week_plan(3).days, (1,) * 7)
+        self.assertIsNone(schedules.week_plan(2))
+        summer = schedules.day_plan(2)
+        self.assertEqual(summer.slots, ((0, 1), (480, 2), (1350, 0)))
+        self.assertEqual(len(summer.functions), 5)
+        self.assertEqual(
+            (summer.functions[0].start_minute, summer.functions[0].function),
+            (270, 5),
+        )
+        boost = schedules.day_plan(3).functions[0]
+        self.assertEqual(
+            (boost.start_minute, boost.function, boost.duration_minutes, boost.room_id),
+            (420, 2, 20, 3),
+        )
+
+    def make_client(self, answers):
+        client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
+        client.close = Mock()
+        requests = []
+
+        def request(request, confirm, body=b"", **_kwargs):
+            requests.append(request)
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return SimpleNamespace(body=answer)
+
+        session = SimpleNamespace(request=request)
+        client._session = session
+        client._connected_session = lambda: session
+        return client, requests
+
+    def test_list_waits_for_the_next_poll_after_a_closed_connection(self):
+        client, requests = self.make_client([schedules_message()])
+        client._session = None
+        self.assertIsNone(client._read_schedules(self.state()))
+        self.assertEqual(requests, [])
+
+    def test_refused_connection_does_not_fail_the_snapshot(self):
+        client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
+        client.close = Mock()
+        client._session = SimpleNamespace()
+
+        def refuse():
+            raise client_mod.TransportError("unable to establish a connection")
+
+        client._connected_session = refuse
+        self.assertIsNone(client._read_schedules(self.state()))
+        self.assertGreater(client._schedules_retry_after, 0)
+
+    def state(self, week_plan=3, day_plan=1):
+        return decode_run_state(
+            run_state_message(week_plan=week_plan, day_plan=day_plan)
+        )
+
+    def test_list_is_cached_until_it_may_have_changed(self):
+        test_plan = day_plan_message(3, "Test", ((0, 1),))
+        client, requests = self.make_client(
+            [schedules_message(), schedules_message(extra_day=(test_plan,))]
+        )
+        first = client._read_schedules(self.state())
+        self.assertEqual(len(first.day_plans), 2)
+        self.assertIs(client._read_schedules(self.state()), first)
+        self.assertEqual(requests, [OperationType.SCHEDULES_REQUEST])
+        # The gateway announces a change made in the app.
+        client._handle_notification(
+            Operation(type=OperationType.SCHEDULES_NOTIFICATION), b""
+        )
+        second = client._read_schedules(self.state())
+        self.assertEqual(len(second.day_plans), 3)
+        self.assertEqual(len(requests), 2)
+
+    def test_list_is_read_again_for_an_unknown_active_plan(self):
+        client, requests = self.make_client([schedules_message(), schedules_message()])
+        client._read_schedules(self.state())
+        client._read_schedules(self.state(week_plan=7))
+        self.assertEqual(len(requests), 2)
+
+    def test_refused_request_is_not_repeated_and_keeps_the_snapshot(self):
+        client, requests = self.make_client([GatewayResponseError(2, None)])
+        self.assertIsNone(client._read_schedules(self.state()))
+        self.assertIsNone(client._read_schedules(self.state()))
+        self.assertEqual(len(requests), 1)
+        client.close.assert_called_once_with()
+
+    def test_missing_answer_is_retried_later_and_keeps_the_last_list(self):
+        client, requests = self.make_client(
+            [schedules_message(), ProtocolError("timed out")]
+        )
+        first = client._read_schedules(self.state())
+        client._handle_notification(
+            Operation(type=OperationType.SCHEDULES_NOTIFICATION), b""
+        )
+        self.assertIs(client._read_schedules(self.state()), first)
+        self.assertIs(client._read_schedules(self.state()), first)
+        self.assertEqual(len(requests), 2)
+
+    def test_command_read_back_does_not_request_the_list(self):
+        client, requests = self.make_client([])
+        client._version = VersionInfo(None, None, None, None, None)
+        client._read_run_state = lambda: self.state()
+        client._read_rooms = lambda: ()
+        self.assertIsNone(client.read_snapshot(refresh_properties=False).schedules)
+        self.assertEqual(requests, [])
+
+    def test_week_plan_sensor_and_today_functions(self):
+        data = replace(
+            snapshot(rooms_message()),
+            run_state=decode_run_state(
+                run_state_message(
+                    week_plan=1,
+                    day_plan=2,
+                    slots=((0, 1), (480, 2), (1350, 0)),
+                    name=b"Sommertagesplan",
+                )
+            ),
+            schedules=decode_schedules(
+                schedules_message(
+                    extra_day=(
+                        day_plan_message(3, "Test", ((0, 1),), ((420, 2, 20, 3),)),
+                    )
+                )
+            ),
+        )
+        entities = set_up(sensor, FakeCoordinator(data))
+        week = next(
+            e for e in entities if isinstance(e, sensor.ConnectBoxWeekPlanSensor)
+        )
+        self.assertEqual(week.native_value, "Sommerwochenplan")
+        attributes = week.extra_state_attributes
+        self.assertEqual(attributes["week_plan"], 1)
+        self.assertEqual(attributes["days"], ["Sommertagesplan"] * 7)
+        self.assertEqual(
+            [(plan["id"], plan["name"]) for plan in attributes["week_plans"]],
+            [(1, "Sommerwochenplan"), (3, "Winterwochenplan")],
+        )
+        self.assertEqual(
+            attributes["day_plans"][2]["functions"],
+            [
+                {
+                    "start": "07:00",
+                    "function": "boost",
+                    "duration_minutes": 20,
+                    "room": "Arbeitszimmer",
+                }
+            ],
+        )
+        today = next(
+            e for e in entities if isinstance(e, sensor.ConnectBoxDayPlanSensor)
+        )
+        self.assertEqual(
+            today.extra_state_attributes["functions"][0],
+            {
+                "start": "04:30",
+                "function": "summer_ventilation",
+                "duration_minutes": 60,
+                "room": None,
+            },
+        )
+
+    def test_week_plan_sensor_needs_the_list(self):
+        data = replace(
+            snapshot(rooms_message()), run_state=decode_run_state(run_state_message())
+        )
+        entities = set_up(sensor, FakeCoordinator(data))
+        self.assertFalse(
+            any(isinstance(e, sensor.ConnectBoxWeekPlanSensor) for e in entities)
+        )
+
+
+class DayPlanSensorTests(unittest.TestCase):
+    def snapshot_with_plan(self, message, **kwargs):
+        data = snapshot(message, **kwargs)
+        return replace(
+            data,
+            run_state=replace(
+                decode_run_state(run_state_message()),
+                run_mode=kwargs.get("run_mode", 1),
+            ),
+        )
+
+    def test_day_plan_sensor(self):
+        coordinator = FakeCoordinator(self.snapshot_with_plan(rooms_message()))
+        entities = set_up(sensor, coordinator)
+        plan = next(
+            e for e in entities if isinstance(e, sensor.ConnectBoxDayPlanSensor)
+        )
+        self.assertEqual(plan.native_value, "Wintertagesplan")
+        self.assertEqual(
+            plan.extra_state_attributes,
+            {
+                "day_plan": 1,
+                "week_plan": 3,
+                "slots": [
+                    {"start": "00:00", "situation": "asleep"},
+                    {"start": "08:00", "situation": "awake"},
+                    {"start": "21:00", "situation": "asleep"},
+                ],
+            },
+        )
 
 
 class EncodingTests(unittest.TestCase):
