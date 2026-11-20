@@ -124,31 +124,10 @@ SUMMER_VENTILATION_ROLE_VALUES = {
 # Boost of a room. The app offers a duration of 15 to 120 minutes per room in
 # steps of 15 and starts and stops the boost on its ventilation page. A
 # duration written as room field 22 showed in the app; starting and stopping
-# uses the app's room-value update (protocol.ROOM_VALUE_BOOST_UNTIL). The
-# writes are logged in the diagnostics capture until confirmed on more units.
+# uses the app's room-value update (protocol.ROOM_VALUE_BOOST_UNTIL).
 BOOST_DURATION_MINIMUM = 15
 BOOST_DURATION_MAXIMUM = 120
 BOOST_DURATION_STEP = 15
-CANDIDATE_WRITE_LOG_SIZE = 20
-
-# Temporary capture build: properties that the official app reads from
-# ComfoSpot 50 units, read once per diagnostics download. The app's device
-# page shows the bath function, the runtime of level 1 per hour, the summer
-# ventilation role, the automatic operating mode and three operating-hour
-# counters; the capture is used to match them to these properties. Each group
-# is one bounded read sequence, so a rejected group does not affect the
-# others.
-CAPTURE_PROPERTY_GROUPS: tuple[tuple[tuple[int, int, int], ...], ...] = (
-    ((38, 0, 5), (38, 0, 6), (38, 0, 8)),
-    ((38, 0, 9), (38, 0, 10), (38, 0, 11)),
-    ((38, 0, 13), (38, 0, 14)),
-    ((38, 0, 18), (38, 0, 19)),
-    ((38, 1, 5), (38, 1, 6)),
-    ((38, 1, 18), (38, 1, 19)),
-    ((36, 0, 3), (36, 0, 4)),
-    ((36, 1, 3), (36, 1, 4)),
-)
-CAPTURE_TIME_BUDGET = 40.0
 
 # Sensor types in a unit's sensor list (device field 8 of the room model).
 SENSOR_TYPE_TEMPERATURE = 1
@@ -271,11 +250,11 @@ def summer_ventilation_role_key(device: AttachedDevice) -> PropertyKey | None:
     return _reported_key(device, SUMMER_VENTILATION_ROLE.key)
 
 
-def supports_boost_candidates(room: Room, device: AttachedDevice) -> bool:
-    """Limit the boost writes to rooms like the one they were checked on.
+def supports_boost(room: Room, device: AttachedDevice) -> bool:
+    """Offer the boost for rooms like the ones it was checked on.
 
     The room must report its boost duration, and the unit must be a
-    ComfoSpot 50, the profile on which the boost fields were observed.
+    ComfoSpot 50, the profile on which the boost was checked against the app.
     """
     return supports_sensor_status(device) and room.boost_duration is not None
 

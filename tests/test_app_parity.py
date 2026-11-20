@@ -1,4 +1,4 @@
-"""Check the test build's role write, boost duration and capture offline."""
+"""Check the unit settings, boost, schedules and session handling offline."""
 
 import asyncio
 import tempfile
@@ -24,7 +24,7 @@ from custom_components.zehnder_connectbox import (
     status,
     switch,
 )
-from custom_components.zehnder_connectbox.client import CaptureError, ConnectBoxClient
+from custom_components.zehnder_connectbox.client import ConnectBoxClient
 from custom_components.zehnder_connectbox.coordinator import (
     ZehnderConnectBoxCoordinator,
 )
@@ -529,22 +529,6 @@ class EntityTests(unittest.TestCase):
         self.assertFalse(idle.is_on)
         self.assertIsNone(idle.extra_state_attributes["ends_at"])
 
-    def test_capture_switch_selects_the_unit(self):
-        coordinator = FakeCoordinator(snapshot(rooms_message()))
-        coordinator.capture_device_ids = set()
-        (entity,) = [
-            item
-            for item in set_up(switch, coordinator)
-            if isinstance(item, switch.ConnectBoxPropertyCaptureSwitch)
-        ]
-        entity.async_write_ha_state = Mock()
-        self.assertFalse(entity.is_on)
-        asyncio.run(entity.async_turn_on())
-        self.assertEqual(coordinator.capture_device_ids, {7})
-        self.assertTrue(entity.is_on)
-        asyncio.run(entity.async_turn_off())
-        self.assertEqual(coordinator.capture_device_ids, set())
-
     def test_boost_switch_needs_a_reported_duration(self):
         coordinator = FakeCoordinator(snapshot(rooms_message(boost_duration=None)))
         self.assertEqual(self.boost_switches(coordinator), [])
@@ -603,16 +587,18 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(raised.exception.translation_key, key)
         self.client.set_summer_ventilation_role.assert_not_called()
 
-    async def test_boost_duration_outcomes_are_logged_for_the_capture(self):
+    async def test_boost_duration_outcomes(self):
         result = snapshot(rooms_message(boost_duration=45))
         self.client.set_boost_duration = Mock(return_value=result)
         await self.coordinator.async_set_boost_duration(3, 45)
+        self.assertIs(self.coordinator.data, result)
 
         self.client.set_boost_duration = Mock(
             side_effect=GatewayResponseError(3, "synthetic refusal")
         )
-        with self.assertRaises(ServiceValidationError):
+        with self.assertRaises(ServiceValidationError) as raised:
             await self.coordinator.async_set_boost_duration(3, 60)
+        self.assertEqual(raised.exception.translation_key, "command_rejected")
 
         self.client.set_boost_duration = Mock(
             side_effect=ProtocolError("gateway did not report the written value")
@@ -621,51 +607,14 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             await self.coordinator.async_set_boost_duration(3, 75)
         self.assertEqual(raised.exception.translation_key, "command_failed")
 
-        log = self.coordinator.candidate_writes
-        self.assertEqual(
-            [(item["write"], item["room"], item["value"]) for item in log],
-            [("boost_duration", 3, 45), ("boost_duration", 3, 60), ("boost_duration", 3, 75)],
-        )
-        self.assertEqual(log[0]["result"], "confirmed")
-        self.assertEqual(
-            log[0]["read_back"],
-            {"boost_duration": 45, "boost_ends_in_seconds": None},
-        )
-        self.assertEqual(log[1]["result"], "rejected: result 3: synthetic refusal")
-        self.assertEqual(
-            log[2]["result"],
-            "ProtocolError: gateway did not report the written value",
-        )
-
-    async def test_boost_start_and_stop_are_logged_with_the_duration(self):
+    async def test_boost_start_and_stop(self):
         result = snapshot(rooms_message(boost_until=int(time.time()) + 900))
         self.client.set_boost = Mock(return_value=result)
         await self.coordinator.async_set_boost(3, True)
         self.client.set_boost.assert_called_once_with(3, True)
+        self.assertIs(self.coordinator.data, result)
         await self.coordinator.async_set_boost(3, False)
-        log = self.coordinator.candidate_writes
-        self.assertEqual(
-            [(item["write"], item["value"], item["result"]) for item in log],
-            [("boost_start", 15, "confirmed"), ("boost_stop", 0, "confirmed")],
-        )
-        self.assertGreater(log[0]["read_back"]["boost_ends_in_seconds"], 800)
-
-    async def test_capture_reads_only_the_selected_units(self):
-        self.client.capture = Mock(return_value=("state", (), {}))
-        await self.coordinator.async_capture()
-        targets = self.client.capture.call_args.args[0]
-        self.assertEqual(targets, ())
-        self.coordinator.capture_device_ids.add(7)
-        await self.coordinator.async_capture()
-        targets = self.client.capture.call_args.args[0]
-        self.assertEqual([(device_id, product) for device_id, product, _groups in targets], [(7, 30)])
-
-    async def test_unsolicited_frames_are_copied_for_the_diagnostics(self):
-        self.client._record_unsolicited(Operation(type=207), b"\x08\x01")
-        frames = await self.coordinator.async_unsolicited_frames()
-        count, last = frames[207]
-        self.assertEqual(count, 1)
-        self.assertEqual(last[0][1:], (None, None, b"\x08\x01"))
+        self.client.set_boost.assert_called_with(3, False)
 
 
 class FakeTransport:
@@ -687,7 +636,7 @@ def gateway_frame(operation, body=b""):
     return Frame(GATEWAY, APP, operation.encode(), body).encode()
 
 
-class TestRequestTests(unittest.TestCase):
+class SessionTests(unittest.TestCase):
     def test_exchange_returns_any_answer_unchecked(self):
         transport = FakeTransport(
             [gateway_frame(Operation(type=777, result=5, reference=1), b"\x08\x01")]
@@ -711,18 +660,7 @@ class TestRequestTests(unittest.TestCase):
                 with self.assertRaises(error):
                     session.request(194, 195)
 
-    def test_structure_shows_text_only_on_request(self):
-        body = encode_uint(1, 2) + encode_string(2, "Sommertagesplan")
-        self.assertEqual(
-            diagnostics._frame_structure(body, {}), {"f1": 2, "f2": "text(len=15)"}
-        )
-        self.assertEqual(
-            diagnostics._frame_structure(body, {}, show_text=True),
-            {"f1": 2, "f2": "Sommertagesplan"},
-        )
-
-
-class UnsolicitedFrameTests(unittest.TestCase):
+class NotificationTests(unittest.TestCase):
     def test_session_reports_frames_that_answer_no_request(self):
         seen = []
         transport = FakeTransport(
@@ -750,170 +688,6 @@ class UnsolicitedFrameTests(unittest.TestCase):
         )
         session = ConnectBoxSession(transport, GATEWAY, APP)
         self.assertEqual(session.request(194, 195).body, b"answer")
-
-    def test_client_counts_frames_and_keeps_the_latest_bodies(self):
-        client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
-        samples = client_mod.UNSOLICITED_SAMPLES
-        for index in range(samples + 2):
-            client._record_unsolicited(Operation(type=207), bytes((8, index)))
-        entry = client.unsolicited_frames[207]
-        self.assertEqual(entry.count, samples + 2)
-        self.assertEqual(
-            [body for _at, _reference, _result, body in entry.last],
-            [bytes((8, index)) for index in range(2, samples + 2)],
-        )
-        for operation_type in range(1000, 1000 + client_mod.UNSOLICITED_TYPE_LIMIT + 5):
-            client._record_unsolicited(Operation(type=operation_type), b"")
-        self.assertEqual(
-            len(client.unsolicited_frames), client_mod.UNSOLICITED_TYPE_LIMIT
-        )
-
-    def test_diagnostics_show_structure_without_names_or_identities(self):
-        other_app = UUID(int=77).bytes
-        body = b"".join(
-            (
-                encode_uint(1, 3),
-                encode_string(2, "Arbeitszimmer"),
-                encode_bytes(5, other_app),
-                encode_bytes(6, GATEWAY.bytes),
-                encode_bytes(12, encode_uint(1, 0) + encode_uint(2, 4)),
-                encode_bytes(13, b"\x3c"),
-                encode_bytes(14, encode_bytes(1, encode_string(2, "SERIAL-0001"))),
-            )
-        )
-        shown = diagnostics._unsolicited_frames(
-            {207: (4, ((1_800_000_000.0, None, None, body),))},
-            {GATEWAY.bytes: "gateway_uuid"},
-        )
-        entry = shown["207"]
-        self.assertEqual(entry["count"], 4)
-        (frame,) = entry["last"]
-        self.assertEqual(frame["at"], "2027-01-15T08:00:00+00:00")
-        self.assertEqual(
-            frame["body"],
-            {
-                "f1": 3,
-                "f2": "text(len=13)",
-                "f5": "bytes(len=16)",
-                "f6": "same as gateway_uuid",
-                "f12": {
-                    "hex": "08001004",
-                    "uint_le": 68157448,
-                    "as_fields": {"f1": 0, "f2": 4},
-                },
-                "f13": {"hex": "3c", "uint_le": 60},
-                "f14": {"f1": {"f2": "text(len=11)"}},
-            },
-        )
-        text = repr(shown)
-        for private in ("Arbeitszimmer", "SERIAL", other_app.hex()):
-            self.assertNotIn(private, text)
-
-    def test_diagnostics_open_a_sixteen_byte_room_value_update(self):
-        update = b"".join(
-            (
-                encode_uint(1, 3),
-                encode_uint(2, 100),
-                encode_uint(7, 0),
-                encode_uint(8, 1),
-                encode_uint(11, 1795204800),
-                encode_uint(14, 5),
-            )
-        )
-        self.assertEqual(len(update), 16)
-        shown = diagnostics._unsolicited_frames(
-            {207: (1, ((1_800_000_000.0, None, None, encode_bytes(1, update)),))}, {}
-        )
-        self.assertEqual(
-            shown["207"]["last"][0]["body"],
-            {"f1": {"f1": 3, "f2": 100, "f7": 0, "f8": 1, "f11": 1795204800, "f14": 5}},
-        )
-
-    def test_diagnostics_show_an_empty_body_as_none(self):
-        shown = diagnostics._unsolicited_frames(
-            {300: (1, ((1_800_000_000.0, 9, 2, b""),))}, {}
-        )
-        self.assertEqual(
-            shown["300"]["last"][0],
-            {
-                "at": "2027-01-15T08:00:00+00:00",
-                "reference": 9,
-                "result": 2,
-                "body": None,
-            },
-        )
-
-
-class CaptureRobustnessTests(unittest.TestCase):
-    def setUp(self):
-        for name, value in (
-            ("CAPTURE_RETRY_PAUSE", 0),
-            ("CAPTURE_POLL_INTERVAL", 0),
-            ("CAPTURE_SETTLE_TIMEOUT", 0),
-        ):
-            patcher = patch.object(client_mod, name, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        self.client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
-        self.client.close = Mock()
-        self.groups = (((38, 0, 9),), ((38, 0, 13),), ((36, 0, 3),), ((36, 1, 3),))
-
-    def test_skips_the_remaining_groups_after_repeated_failures(self):
-        attempts = []
-
-        def refuse():
-            attempts.append(True)
-            raise client_mod.TransportError("unable to establish a connection")
-
-        self.client._connected_session = refuse
-        self.client._read_rooms = lambda: decode_rooms(rooms_message())
-        self.client._read_run_state = lambda: run_state()
-        _state, _rooms, result = self.client.capture(
-            ((7, 30, self.groups),), deadline=time.monotonic() + 30
-        )
-        self.assertEqual(len(attempts), client_mod.CAPTURE_FAILURE_LIMIT)
-        self.assertTrue(result[7]["errors"][-1].endswith("skipped after 3 failures"))
-        self.assertIn("TransportError", result[7]["errors"][0])
-
-    def test_final_read_is_retried_and_failure_keeps_the_group_errors(self):
-        session = SimpleNamespace(
-            request=Mock(side_effect=GatewayResponseError(2, "refused"))
-        )
-        self.client._connected_session = lambda: session
-        reads = []
-
-        def failing_read():
-            reads.append(True)
-            raise client_mod.TransportError("gateway read failed")
-
-        self.client._read_rooms = failing_read
-        with self.assertRaises(CaptureError) as raised:
-            self.client.capture(((7, 30, self.groups[:1]),), deadline=time.monotonic() + 30)
-        self.assertEqual(len(reads), 2)
-        self.assertIn("TransportError: gateway read failed", str(raised.exception))
-        self.assertIn("refused", raised.exception.errors[7][0])
-
-    def test_diagnostics_show_the_capture_error_and_group_errors(self):
-        async def failing_capture():
-            raise CaptureError("TransportError: gateway read failed", {7: ["38.0.9: x"]})
-
-        async def frames():
-            return {}
-
-        coordinator = FakeCoordinator(snapshot(rooms_message()))
-        coordinator.async_capture = failing_capture
-        coordinator.async_unsolicited_frames = frames
-        entry = SimpleNamespace(
-            runtime_data=coordinator, version=1, data={"gateway_uuid": str(GATEWAY)}
-        )
-        result = asyncio.run(diagnostics.async_get_config_entry_diagnostics(None, entry))
-        capture = result["capture"]
-        self.assertEqual(capture["source"], "last poll")
-        self.assertEqual(
-            capture["error"], "CaptureError: TransportError: gateway read failed"
-        )
-        self.assertEqual(capture["group_errors"], {"7": ["38.0.9: x"]})
-
 
 # --- unit settings, error log, schedules ------------------------------------------
 
@@ -1284,7 +1058,7 @@ class ScheduleListTests(unittest.TestCase):
         self.assertIs(client._read_schedules(self.state()), first)
         self.assertEqual(requests, [OperationType.SCHEDULES_REQUEST])
         # The gateway announces a change made in the app.
-        client._record_unsolicited(
+        client._handle_notification(
             Operation(type=OperationType.SCHEDULES_NOTIFICATION), b""
         )
         second = client._read_schedules(self.state())
@@ -1309,7 +1083,7 @@ class ScheduleListTests(unittest.TestCase):
             [schedules_message(), ProtocolError("timed out")]
         )
         first = client._read_schedules(self.state())
-        client._record_unsolicited(
+        client._handle_notification(
             Operation(type=OperationType.SCHEDULES_NOTIFICATION), b""
         )
         self.assertIs(client._read_schedules(self.state()), first)
@@ -1387,3 +1161,27 @@ class ScheduleListTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def test_diagnostics_show_settings_without_identities(self):
+        data = snapshot(rooms_message(role=1))
+        coordinator = SimpleNamespace(
+            data=data,
+            last_update_success=True,
+            client=SimpleNamespace(unsupported_gateway_reads={"users"}),
+        )
+        entry = SimpleNamespace(
+            runtime_data=coordinator,
+            version=1,
+            data={"gateway_uuid": str(GATEWAY), "host": "192.0.2.1"},
+        )
+        result = asyncio.run(diagnostics.async_get_config_entry_diagnostics(None, entry))
+        self.assertNotIn("capture", result)
+        self.assertEqual(result["gateway"]["unsupported_gateway_reads"], ["users"])
+        device = result["attached_devices"][0]
+        self.assertEqual(device["summer_ventilation_role"], "supply")
+        self.assertEqual(device["level_one_runtime"], 60)
+        text = repr(result)
+        for secret in ("Arbeitszimmer", "SERIAL-0001", str(GATEWAY), "192.0.2.1"):
+            self.assertNotIn(secret, text)

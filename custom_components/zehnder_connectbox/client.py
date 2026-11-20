@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import time
-from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 from .const import (
@@ -53,7 +52,7 @@ from .profiles import (
     optional_property_specs_for_device,
     property_specs_for_device,
     settings_property_specs_for_device,
-    supports_boost_candidates,
+    supports_boost,
     supports_sensor_mode,
     supports_summer_ventilation,
 )
@@ -159,38 +158,6 @@ SITUATION_LOCATIONS = {
     TemperatureMode.AWAKE: 1,
     TemperatureMode.AWAY: 2,
 }
-# Temporary capture build (see profiles.CAPTURE_PROPERTY_GROUPS).
-CAPTURE_REQUEST_TIMEOUT = 3.0
-CAPTURE_SETTLE_TIMEOUT = 15.0
-CAPTURE_POLL_INTERVAL = 0.5
-# Pause after a failed read sequence before the next one reconnects, and the
-# number of failures in a row after which the remaining groups are skipped.
-CAPTURE_RETRY_PAUSE = 1.0
-CAPTURE_FAILURE_LIMIT = 3
-type CaptureGroups = tuple[tuple[tuple[int, int, int], ...], ...]
-
-
-def capture_value(raw: bytes) -> dict[str, int | str]:
-    """Show short property values only; longer ones may contain text."""
-    if len(raw) > 4:
-        return {"length": len(raw)}
-    return {"hex": raw.hex(), "uint_le": int.from_bytes(raw, "little")}
-
-
-# Temporary capture build: frames without a matching request, per operation
-# type. Only the latest bodies of a type are kept.
-UNSOLICITED_TYPE_LIMIT = 64
-UNSOLICITED_SAMPLES = 8
-
-
-@dataclass(slots=True)
-class UnsolicitedFrames:
-    """Count and latest frames of one unsolicited operation type."""
-
-    count: int = 0
-    last: deque[tuple[float, int | None, int | None, bytes]] = field(
-        default_factory=lambda: deque(maxlen=UNSOLICITED_SAMPLES)
-    )
 
 
 def _function_order(item: ScheduledFunction) -> tuple[int, int, int, int, int]:
@@ -201,14 +168,6 @@ def _function_order(item: ScheduledFunction) -> tuple[int, int, int, int, int]:
         item.room_id,
         item.device_id,
     )
-
-
-class CaptureError(ProtocolError):
-    """Temporary capture build: the final read failed; carries group errors."""
-
-    def __init__(self, message: str, errors: dict[int, list[str]]) -> None:
-        super().__init__(message)
-        self.errors = errors
 
 
 class PairingError(ConnectionError):
@@ -245,8 +204,6 @@ class ConnectBoxClient:
         self._rejected_slow_devices: dict[str, set[tuple[int, int, int | None]]] = {
             name: set() for name in SLOW_PROPERTY_SEQUENCES
         }
-        # Temporary capture build (see _record_unsolicited).
-        self.unsolicited_frames: dict[int, UnsolicitedFrames] = {}
         self._schedules: Schedules | None = None
         self._schedules_read: float | None = None
         self._schedules_unsupported = False
@@ -1366,136 +1323,15 @@ class ConnectBoxClient:
         )
 
     def _boost_room(self, room_id: int) -> Room:
-        """Return a room whose boost may be written in the test build."""
+        """Return a room whose unit offers the boost."""
         room = self._find_room(room_id)
         if room is None:
             raise CommandValidationError("room_unavailable")
         if not any(
-            supports_boost_candidates(room, device) for device in room.devices
+            supports_boost(room, device) for device in room.devices
         ):
             raise CommandValidationError("boost_unsupported")
         return room
-
-    def capture(
-        self,
-        targets: tuple[tuple[int, int, CaptureGroups], ...],
-        *,
-        deadline: float,
-    ) -> tuple[RunState, tuple[Room, ...], dict[int, dict[str, object]]]:
-        """Temporary capture build: read app properties and a fresh state once.
-
-        Only read requests are sent. Each target is (device ID, product type,
-        groups) and each group is one bounded read sequence, so a rejected
-        group does not affect the others. The values are collected from the
-        room model, which is returned together with a fresh run state.
-        """
-        wanted = {
-            device_id: {key for group in groups for key in group}
-            for device_id, _product_type, groups in targets
-        }
-        errors: dict[int, list[str]] = {device_id: [] for device_id in wanted}
-        failures_in_row = 0
-
-        def label(key: tuple[int, int, int]) -> str:
-            return ".".join(str(part) for part in key)
-
-        for device_id, product_type, groups in targets:
-            for group in groups:
-                group_label = ",".join(label(key) for key in group)
-                if time.monotonic() >= deadline:
-                    errors[device_id].append(f"{group_label}: skipped, time budget")
-                    continue
-                if failures_in_row >= CAPTURE_FAILURE_LIMIT:
-                    errors[device_id].append(
-                        f"{group_label}: skipped after {failures_in_row} failures"
-                    )
-                    continue
-                last = len(group) - 1
-                try:
-                    session = self._connected_session()
-                    for index, key in enumerate(group):
-                        if index == 0:
-                            command = PropertySequenceCommand.START
-                        elif index == last:
-                            command = PropertySequenceCommand.FINISH
-                        else:
-                            command = PropertySequenceCommand.CONTINUE
-                        session.request(
-                            OperationType.DEVICE_PROPERTIES_REQUEST,
-                            OperationType.DEVICE_PROPERTIES_CONFIRM,
-                            encode_property_request(
-                                command,
-                                device_id,
-                                PropertyKey(product_type, 255, 0, *key),
-                            ),
-                            timeout=CAPTURE_REQUEST_TIMEOUT,
-                        )
-                except (ProtocolError, TransportError) as err:
-                    errors[device_id].append(
-                        f"{group_label}: {type(err).__name__}: {err}"
-                    )
-                    self.close()
-                    failures_in_row += 1
-                    # A new connection right away may be refused.
-                    time.sleep(CAPTURE_RETRY_PAUSE)
-                else:
-                    failures_in_row = 0
-
-        found: dict[int, dict[tuple[int, int, int], bytes]] = {
-            device_id: {} for device_id in wanted
-        }
-        settle_deadline = min(deadline, time.monotonic() + CAPTURE_SETTLE_TIMEOUT)
-        last_error: Exception | None = None
-        for _attempt in range(2):
-            try:
-                while True:
-                    rooms = self._read_rooms()
-                    for room in rooms:
-                        for device in room.devices:
-                            keys = wanted.get(device.device_id)
-                            if keys is None:
-                                continue
-                            for value in device.properties:
-                                identity = value.key.value_identity
-                                if identity in keys and value.value:
-                                    found[device.device_id][identity] = value.value
-                    complete = all(
-                        len(found[device_id]) == len(keys)
-                        for device_id, keys in wanted.items()
-                    )
-                    if complete or time.monotonic() >= settle_deadline:
-                        break
-                    time.sleep(CAPTURE_POLL_INTERVAL)
-                run_state = self._read_run_state()
-            except (ProtocolError, TransportError) as err:
-                self.close()
-                last_error = err
-                time.sleep(CAPTURE_RETRY_PAUSE)
-            else:
-                break
-        else:
-            raise CaptureError(
-                f"{type(last_error).__name__}: {last_error}", errors
-            ) from last_error
-
-        return (
-            run_state,
-            rooms,
-            {
-                device_id: {
-                    "values": {
-                        label(identity): capture_value(raw)
-                        for identity, raw in sorted(found[device_id].items())
-                    },
-                    "missing": [
-                        label(identity)
-                        for identity in sorted(keys - found[device_id].keys())
-                    ],
-                    "errors": errors[device_id],
-                }
-                for device_id, keys in wanted.items()
-            },
-        )
 
     def close(self) -> None:
         """Close the shared transport."""
@@ -1518,27 +1354,17 @@ class ConnectBoxClient:
             transport,
             self.gateway_uuid,
             self._app_uuid,
-            on_unsolicited=self._record_unsolicited,
+            on_unsolicited=self._handle_notification,
         )
         return self._session
 
-    def _record_unsolicited(self, operation: Operation, body: bytes) -> None:
-        """Temporary capture build: keep frames that answer no request.
+    def _handle_notification(self, operation: Operation, _body: bytes) -> None:
+        """Note what another client changed, from a frame that answers no request.
 
-        The session skips them. Their operation type and the latest bodies are
-        kept in memory only and shown by structure in the diagnostics capture,
-        to see what the gateway reports while the official app changes
-        something, such as starting a boost.
+        The gateway forwards changes of other clients, such as the official
+        app, to every connected client. The affected data is read again with
+        the next poll.
         """
-        entry = self.unsolicited_frames.get(operation.type)
-        if entry is None:
-            if len(self.unsolicited_frames) >= UNSOLICITED_TYPE_LIMIT:
-                return
-            entry = self.unsolicited_frames[operation.type] = UnsolicitedFrames()
-        entry.count += 1
-        entry.last.append(
-            (time.time(), operation.reference, operation.result, bytes(body))
-        )
         if operation.type == OperationType.SCHEDULES_NOTIFICATION:
             # A client changed a schedule; read the list again.
             self._schedules_read = None

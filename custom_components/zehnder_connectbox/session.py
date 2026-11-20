@@ -43,7 +43,8 @@ class ConnectBoxSession:
         self._app_uuid = app_uuid
         self._reference = 0
         self._buffer = b""
-        # Temporary capture build: told about frames that answer no request.
+        # Told about frames that answer no request, such as the changes of
+        # other clients the gateway forwards.
         self._on_unsolicited = on_unsolicited
 
     def request(

@@ -431,9 +431,6 @@
       "boost": {
         "name": "Stoßlüftung"
       },
-      "property_capture": {
-        "name": "Geräteeigenschaften mitlesen (Test)"
-      },
       "absence_planner": {
         "name": "Abwesenheitsplaner"
       },

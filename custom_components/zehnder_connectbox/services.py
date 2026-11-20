@@ -18,7 +18,7 @@ from homeassistant.helpers import config_validation as cv
 from .const import DOMAIN
 from .coordinator import ZehnderConnectBoxCoordinator
 from .models import GatewaySnapshot, ScheduledFunction, Schedules
-from .profiles import supports_boost_candidates
+from .profiles import supports_boost
 from .protocol import PLAN_NAME_MAX_BYTES
 
 SERVICE_SAVE_DAY_PLAN = "save_day_plan"
@@ -172,7 +172,7 @@ def _function_room(snapshot: GatewaySnapshot, reference: int | str | None) -> in
             else (room.name or "").casefold() == reference.strip().casefold()
         )
         if matches and any(
-            supports_boost_candidates(room, device) for device in room.devices
+            supports_boost(room, device) for device in room.devices
         ):
             return room.room_id
     raise _error("function_room_invalid")

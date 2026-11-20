@@ -58,15 +58,34 @@ async def async_setup_entry(
     coordinator = ZehnderConnectBoxCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
-    # The internet access was briefly shown as an indicator; it is a switch.
-    registry = er.async_get(hass)
-    stale = registry.async_get_entity_id(
-        "binary_sensor", DOMAIN, f"{entry.data[CONF_GATEWAY_UUID]}_remote_access"
-    )
-    if stale is not None:
-        registry.async_remove(stale)
+    _remove_stale_entities(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+# Entities of earlier test builds, by platform and unique-ID suffix: the
+# switches that read a unit's app properties for the diagnostics, and the
+# internet access, which was briefly an indicator and is now a switch.
+STALE_ENTITIES = (
+    (Platform.SWITCH, "_property_capture"),
+    (Platform.BINARY_SENSOR, "_remote_access"),
+)
+
+
+def _remove_stale_entities(
+    hass: HomeAssistant, entry: ZehnderConnectBoxConfigEntry
+) -> None:
+    """Remove registry entries that no entity provides any more."""
+    registry = er.async_get(hass)
+    gateway_uuid = entry.data[CONF_GATEWAY_UUID]
+    for item in er.async_entries_for_config_entry(registry, entry.entry_id):
+        for platform, suffix in STALE_ENTITIES:
+            if (
+                item.domain == platform
+                and item.unique_id.startswith(gateway_uuid)
+                and item.unique_id.endswith(suffix)
+            ):
+                registry.async_remove(item.entity_id)
 
 
 async def async_unload_entry(

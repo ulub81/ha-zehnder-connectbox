@@ -431,9 +431,6 @@
       "boost": {
         "name": "Boost"
       },
-      "property_capture": {
-        "name": "Read app properties (test)"
-      },
       "absence_planner": {
         "name": "Absence planner"
       },

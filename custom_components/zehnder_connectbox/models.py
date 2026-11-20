@@ -197,8 +197,6 @@ class RunState:
     summer_ventilation: bool | None
     summer_ventilation_end: int | None
     errors: tuple[int, ...]
-    # Temporary capture build: the undecoded run-state message.
-    raw: bytes = field(default=b"", repr=False, compare=False)
     week_plan: int | None = None
     """ID of the active weekly schedule.
 

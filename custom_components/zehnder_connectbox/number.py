@@ -18,7 +18,7 @@ from .profiles import (
     LEVEL_ONE_RUNTIME_VALUES,
     level_one_runtime,
     level_one_runtime_key,
-    supports_boost_candidates,
+    supports_boost,
     supports_summer_ventilation,
 )
 
@@ -60,7 +60,7 @@ async def async_setup_entry(
             device.device_id
             for room in coordinator.data.rooms
             for device in room.devices
-            if supports_boost_candidates(room, device)
+            if supports_boost(room, device)
         } - known_boost
         if new_ids:
             async_add_entities(
@@ -147,8 +147,8 @@ class ConnectBoxSummerVentilationDuration(ConnectBoxGatewayEntity, NumberEntity)
 class ConnectBoxBoostDuration(ConnectBoxDeviceEntity, NumberEntity):
     """Duration of a boost in the unit's room, as set in the app.
 
-    The app offers 15 to 120 minutes per room. The value is written with a
-    room write whose outcome is listed in the diagnostics capture.
+    The app offers 15 to 120 minutes per room. The room is written back as
+    read with only its boost duration changed.
     """
 
     _attr_translation_key = "boost_duration"
@@ -177,7 +177,7 @@ class ConnectBoxBoostDuration(ConnectBoxDeviceEntity, NumberEntity):
         if not super().available:
             return False
         data = self.device_data
-        return data is not None and supports_boost_candidates(*data)
+        return data is not None and supports_boost(*data)
 
     async def async_set_native_value(self, value: float) -> None:
         """Write the duration in the app's steps of 15 minutes."""

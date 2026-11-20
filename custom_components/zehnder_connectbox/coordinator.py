@@ -19,7 +19,6 @@ from homeassistant.exceptions import (
 )
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.util import dt as dt_util
 
 from .client import ConnectBoxClient
 from .const import (
@@ -35,23 +34,17 @@ from .firmware import FirmwarePackage
 from .models import (
     DayPlan,
     GatewaySnapshot,
-    Room,
     RunMode,
-    RunState,
     ScheduledFunction,
     Schedules,
     WeekPlan,
 )
 from .profiles import (
-    CANDIDATE_WRITE_LOG_SIZE,
-    CAPTURE_PROPERTY_GROUPS,
-    CAPTURE_TIME_BUDGET,
     FILTER_RUNTIME,
     format_version,
     level_one_runtime_key,
     product_name,
     summer_ventilation_role_key,
-    supports_sensor_status,
 )
 from .protocol import ProtocolError
 from .session import GatewayResponseError
@@ -104,12 +97,6 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         self._failures = 0
         self._last_non_off_mode = RunMode.MANUAL
         self._io_lock = asyncio.Lock()
-        # Temporary test build: outcome of the boost candidate writes, shown
-        # in the diagnostics capture.
-        self.candidate_writes: list[dict[str, object]] = []
-        # Temporary capture build: units whose app properties are read when
-        # the diagnostics are downloaded (see async_capture). Not stored.
-        self.capture_device_ids: set[int] = set()
         # Absence period chosen while the planner is off, as Unix time. It is
         # written when the planner is switched on. Not stored.
         self.pending_absence_start: int | None = None
@@ -276,89 +263,17 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         self._accept_command_snapshot(snapshot)
 
     async def async_set_boost_duration(self, room_id: int, minutes: int) -> None:
-        """Temporary test build: write a room's boost duration and log it."""
-        await self._async_boost_candidate(
-            room_id,
-            "boost_duration",
-            minutes,
-            partial(self.client.set_boost_duration, room_id, minutes),
+        """Write a room's boost duration and confirm it."""
+        snapshot = await self._async_execute_command(
+            partial(self.client.set_boost_duration, room_id, minutes)
         )
+        self._accept_command_snapshot(snapshot)
 
     async def async_set_boost(self, room_id: int, active: bool) -> None:
-        """Start or stop a room's boost and log the outcome for the capture."""
-        data = self.data
-        room = (
-            next((item for item in data.rooms if item.room_id == room_id), None)
-            if data is not None
-            else None
+        """Start or stop a room's boost and confirm it."""
+        snapshot = await self._async_execute_command(
+            partial(self.client.set_boost, room_id, active)
         )
-        duration = room.boost_duration if room is not None else None
-        await self._async_boost_candidate(
-            room_id,
-            "boost_start" if active else "boost_stop",
-            (duration or 0) if active else 0,
-            partial(self.client.set_boost, room_id, active),
-        )
-
-    async def _async_boost_candidate(
-        self,
-        room_id: int,
-        write: str,
-        value: int,
-        command: Callable[[], GatewaySnapshot],
-    ) -> None:
-        """Temporary test build: run a boost candidate write and log its outcome.
-
-        The log is listed in the diagnostics capture under candidate_writes,
-        with the gateway's answer and the boost values it reports afterwards.
-        """
-
-        def read_back(snapshot: GatewaySnapshot) -> dict[str, object] | None:
-            room = next(
-                (item for item in snapshot.rooms if item.room_id == room_id), None
-            )
-            if room is None:
-                return None
-            return {
-                "boost_duration": room.boost_duration,
-                "boost_ends_in_seconds": (
-                    room.boost_until - int(time.time()) if room.boost_until else None
-                ),
-            }
-
-        await self._async_logged_write(
-            {"room": room_id, "write": write, "value": value}, command, read_back
-        )
-
-    async def _async_logged_write(
-        self,
-        details: dict[str, object],
-        command: Callable[[], GatewaySnapshot],
-        read_back: Callable[[GatewaySnapshot], dict[str, object] | None],
-    ) -> None:
-        """Run a write and log its outcome under candidate_writes."""
-        record: dict[str, object] = {
-            "at": dt_util.utcnow().isoformat(timespec="seconds"),
-            **details,
-            "result": "pending",
-        }
-        self.candidate_writes.append(record)
-        del self.candidate_writes[:-CANDIDATE_WRITE_LOG_SIZE]
-        try:
-            snapshot = await self._async_execute_command(command)
-        except HomeAssistantError as err:
-            cause = err.__cause__
-            if isinstance(cause, GatewayResponseError):
-                record["result"] = f"rejected: result {cause.result}: {cause}"
-            elif cause is not None:
-                record["result"] = f"{type(cause).__name__}: {cause}"
-            else:
-                record["result"] = type(err).__name__
-            raise
-        record["result"] = "confirmed"
-        values = read_back(snapshot)
-        if values is not None:
-            record["read_back"] = values
         self._accept_command_snapshot(snapshot)
 
     async def async_set_active_week_plan(self, plan_id: int) -> None:
@@ -541,96 +456,29 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
     async def async_set_site_info(
         self, *, name: str | None = None, language: int | None = None
     ) -> None:
-        """Change the system name or language and log the outcome."""
-        details: dict[str, object] = {"write": "site"}
-        if name is not None:
-            details["name_bytes"] = len(name.encode())
-        if language is not None:
-            details["language"] = language
-
-        def read_back(snapshot: GatewaySnapshot) -> dict[str, object] | None:
-            site = snapshot.site
-            return {"language": site.language} if site is not None else None
-
-        await self._async_logged_write(
-            details,
-            partial(self.client.set_site_info, name=name, language=language),
-            read_back,
+        """Change the system name or language and confirm it."""
+        snapshot = await self._async_execute_command(
+            partial(self.client.set_site_info, name=name, language=language)
         )
+        self._accept_command_snapshot(snapshot)
 
     async def async_set_remote_access(self, enabled: bool) -> None:
-        """Switch the access over the internet and log the outcome."""
-        await self._async_logged_write(
-            {"write": "remote_access", "value": enabled},
-            partial(self.client.set_remote_access, enabled),
-            lambda snapshot: {"remote_access": snapshot.remote_access},
+        """Switch the access over the internet and confirm it."""
+        snapshot = await self._async_execute_command(
+            partial(self.client.set_remote_access, enabled)
         )
+        self._accept_command_snapshot(snapshot)
 
     async def async_set_room_settings(
         self, room_id: int, *, name: str | None = None, room_type: int | None = None
     ) -> None:
-        """Change a room's name or type and log the outcome."""
-        details: dict[str, object] = {"room": room_id, "write": "room_settings"}
-        if name is not None:
-            details["name_bytes"] = len(name.encode())
-        if room_type is not None:
-            details["room_type"] = room_type
-
-        def read_back(snapshot: GatewaySnapshot) -> dict[str, object] | None:
-            room = next(
-                (item for item in snapshot.rooms if item.room_id == room_id), None
-            )
-            return {"room_type": room.room_type} if room is not None else None
-
-        await self._async_logged_write(
-            details,
+        """Change a room's name or type and confirm it."""
+        snapshot = await self._async_execute_command(
             partial(
                 self.client.set_room_settings, room_id, name=name, room_type=room_type
-            ),
-            read_back,
-        )
-
-    async def async_capture(
-        self,
-    ) -> tuple[RunState, tuple[Room, ...], dict[int, dict[str, object]]]:
-        """Temporary capture build: read app properties and a fresh state.
-
-        Used only when the diagnostics are downloaded. The app's properties are
-        requested only for the ComfoSpot 50 units whose capture switch is on,
-        because every property read goes over the radio link and counts
-        against its duty cycle; nothing is written. The room model and run
-        state are always read fresh; they come from the gateway itself.
-        """
-        snapshot = self.data
-        devices = (
-            [device for room in snapshot.rooms for device in room.devices]
-            if snapshot is not None
-            else []
-        )
-        targets = tuple(
-            (device.device_id, device.product_type, CAPTURE_PROPERTY_GROUPS)
-            for device in devices
-            if supports_sensor_status(device)
-            and device.device_id in self.capture_device_ids
-        )
-        deadline = time.monotonic() + CAPTURE_TIME_BUDGET
-        async with self._io_lock:
-            return await self.hass.async_add_executor_job(
-                partial(self.client.capture, targets, deadline=deadline)
             )
-
-    async def async_unsolicited_frames(
-        self,
-    ) -> dict[int, tuple[int, tuple[tuple[float, int | None, int | None, bytes], ...]]]:
-        """Temporary capture build: copy the frames that answered no request.
-
-        Taken under the I/O lock, so no request adds a frame meanwhile.
-        """
-        async with self._io_lock:
-            return {
-                operation_type: (entry.count, tuple(entry.last))
-                for operation_type, entry in self.client.unsolicited_frames.items()
-            }
+        )
+        self._accept_command_snapshot(snapshot)
 
     async def async_close(self) -> None:
         """Close the client outside Home Assistant's event loop."""
