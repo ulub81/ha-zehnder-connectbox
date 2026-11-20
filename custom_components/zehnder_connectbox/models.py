@@ -129,13 +129,18 @@ class ActionLogEntry:
     """One entry of the app's history (Verlauf).
 
     The gateway logs every change with the nickname of the paired client
-    (such as "Home Assistant"), the time as Unix time, a message key such as
+    (such as "Home Assistant"), the time, a message key such as
     CHANGED_DAYPLAN and its parameters, such as the plan's name. It also logs
     the radio duty cycle with the nickname "ComfoRF DUTY CYCLE".
     """
 
     nickname: str | None
     timestamp: int | None
+    """Time of the entry as Unix time.
+
+    The gateway logs its local wall-clock time (an entry made at 19:19 CET
+    read 19:19 as if it were UTC); the client subtracts the gateway's offset.
+    """
     message: str | None
     params: tuple[str, ...] = ()
 

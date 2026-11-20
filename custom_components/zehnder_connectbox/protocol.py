@@ -111,6 +111,8 @@ class OperationType(IntEnum):
     SET_RUN_STATE_CONFIRM = 244
     SET_ACTIVE_WEEK_PLAN_REQUEST = 245
     SET_ACTIVE_WEEK_PLAN_CONFIRM = 246
+    TIME_REQUEST = 260
+    TIME_CONFIRM = 261
     ACTION_LOG_REQUEST = 290
     ACTION_LOG_CONFIRM = 291
     ACTION_LOG_NOTIFICATION = 292
@@ -481,6 +483,20 @@ def decode_action_log(message: bytes) -> tuple[ActionLogEntry, ...]:
             )
         )
     return tuple(entries)
+
+
+def decode_local_time_offset(message: bytes) -> int | None:
+    """Decode the gateway's offset of local time from UTC, in seconds.
+
+    The time confirmation carries utcTime and localTime; the local time was
+    reported rounded to the minute, so the offset is rounded to 15 minutes.
+    """
+    fields = decode_fields(message)
+    utc = uint_value(fields, 1)
+    local = uint_value(fields, 2)
+    if utc is None or local is None:
+        return None
+    return round((local - utc) / 900) * 900
 
 
 def decode_remote_access(message: bytes) -> bool | None:

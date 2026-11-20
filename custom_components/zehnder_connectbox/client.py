@@ -62,6 +62,7 @@ from .protocol import (
     ProtocolError,
     decode_action_log,
     decode_day_plan_confirm,
+    decode_local_time_offset,
     decode_pairing,
     decode_remote_access,
     decode_rooms,
@@ -219,6 +220,8 @@ class ConnectBoxClient:
         self._action_log_unsupported = False
         self._remote_access_unsupported = False
         self._action_log_retry_after = 0.0
+        self._local_time_offset: int | None = None
+        self._time_unsupported = False
 
     @classmethod
     def pair(
@@ -952,12 +955,22 @@ class ConnectBoxClient:
         try:
             session = self._connected_session()
             if plan.plan_id == 0:
+                # The gateway dropped the timed functions of a new plan; it
+                # kept them when the plan was changed, so they are added with
+                # a change right after the plan was created.
                 response = session.request(
                     OperationType.ADD_DAY_PLAN_REQUEST,
                     OperationType.ADD_DAY_PLAN_CONFIRM,
-                    encode_day_plan(plan),
+                    encode_day_plan(replace(plan, functions=())),
                 )
                 plan_id = decode_day_plan_confirm(response.body).plan_id
+                if plan.functions:
+                    with self._plan_lock(plan_id, week=False):
+                        session.request(
+                            OperationType.SET_DAY_PLAN_REQUEST,
+                            OperationType.SET_DAY_PLAN_CONFIRM,
+                            encode_day_plan(replace(plan, plan_id=plan_id)),
+                        )
             else:
                 plan_id = plan.plan_id
                 with self._plan_lock(plan_id, week=False):
@@ -1295,6 +1308,10 @@ class ConnectBoxClient:
         ):
             return
         reads: list[tuple[str, OperationType, OperationType]] = []
+        if not self._time_unsupported:
+            reads.append(
+                ("time", OperationType.TIME_REQUEST, OperationType.TIME_CONFIRM)
+            )
         if not self._action_log_unsupported:
             reads.append(
                 (
@@ -1316,12 +1333,18 @@ class ConnectBoxClient:
                 response = self._connected_session().request(
                     request, confirm, timeout=SCHEDULES_REQUEST_TIMEOUT
                 )
-                if name == "log":
-                    self._action_log = decode_action_log(response.body)
+                if name == "time":
+                    self._local_time_offset = decode_local_time_offset(response.body)
+                elif name == "log":
+                    self._action_log = self._unix_time_entries(
+                        decode_action_log(response.body)
+                    )
                 else:
                     self._remote_access = decode_remote_access(response.body)
             except (GatewayResponseError, ProtobufDecodeError):
-                if name == "log":
+                if name == "time":
+                    self._time_unsupported = True
+                elif name == "log":
                     self._action_log_unsupported = True
                     self._action_log = None
                 else:
@@ -1387,6 +1410,20 @@ class ConnectBoxClient:
             return cached
         self._schedules_read = now
         return self._schedules
+
+    def _unix_time_entries(
+        self, entries: tuple[ActionLogEntry, ...]
+    ) -> tuple[ActionLogEntry, ...]:
+        """Turn the gateway's local times into Unix time, where known."""
+        offset = self._local_time_offset
+        if not offset:
+            return entries
+        return tuple(
+            replace(entry, timestamp=entry.timestamp - offset)
+            if entry.timestamp
+            else entry
+            for entry in entries
+        )
 
     def _read_version(self) -> VersionInfo:
         response = self._connected_session().request(

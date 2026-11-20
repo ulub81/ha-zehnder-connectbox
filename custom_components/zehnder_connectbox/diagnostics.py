@@ -358,7 +358,6 @@ async def async_get_config_entry_diagnostics(
             "absence_planned": snapshot.run_state.absence_planned,
             "absence_start": snapshot.run_state.standby_start,
             "absence_end": snapshot.run_state.standby_end,
-            "week_plan": snapshot.run_state.week_plan,
             "remote_access": snapshot.remote_access,
             "history_entries": (
                 len(snapshot.action_log) if snapshot.action_log is not None else None

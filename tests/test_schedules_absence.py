@@ -237,7 +237,8 @@ class FakeScheduleGateway:
         if request in (op.ADD_DAY_PLAN_REQUEST, op.SET_DAY_PLAN_REQUEST):
             plan = decode_schedules(body).day_plans[0]
             if request == op.ADD_DAY_PLAN_REQUEST:
-                plan = replace(plan, plan_id=max(self.day_plans) + 1)
+                # The ConnectBox dropped the functions of a new plan.
+                plan = replace(plan, plan_id=max(self.day_plans) + 1, functions=())
             elif (False, plan.plan_id) not in self.locked:
                 raise GatewayResponseError(9, None)
             if self.drop_functions:
@@ -343,6 +344,48 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(plan_id, 3)
         self.assertEqual(self.gateway.day_plans[3].name, "Homeoffice")
         self.assertNotIn(OperationType.LOCK_DAY_PLAN_REQUEST, self.gateway.requests)
+
+    def test_functions_of_a_new_plan_are_added_with_a_change(self):
+        boost = ScheduledFunction(390, 2, 15, 3)
+        _snapshot, plan_id = self.client.save_day_plan(
+            DayPlan(0, "Homeoffice", ((0, 1), (390, 0)), (boost,))
+        )
+        self.assertEqual(self.gateway.day_plans[plan_id].functions, (boost,))
+        op = OperationType
+        self.assertEqual(
+            self.gateway.requests[:4],
+            [
+                op.ADD_DAY_PLAN_REQUEST,
+                op.LOCK_DAY_PLAN_REQUEST,
+                op.SET_DAY_PLAN_REQUEST,
+                op.RELEASE_DAY_PLAN_REQUEST,
+            ],
+        )
+
+    def test_history_times_are_turned_into_unix_time(self):
+        log = encode_bytes(
+            1,
+            encode_string(1, "Home Assistant")
+            + encode_uint(2, 1795202340)
+            + encode_string(3, "REMOVED_DAYPLAN"),
+        )
+        answers = {
+            OperationType.TIME_REQUEST: encode_uint(1, 1795198822)
+            + encode_uint(2, 1795202400),
+            OperationType.ACTION_LOG_REQUEST: log,
+            OperationType.REMOTE_ACCESS_REQUEST: encode_uint(1, 0),
+        }
+        session = SimpleNamespace(
+            request=lambda request, confirm, body=b"", **_kw: SimpleNamespace(
+                body=answers[request]
+            )
+        )
+        self.client._session = session
+        self.client._connected_session = lambda: session
+        self.client._read_action_log()
+        # Logged at 19:19 CET, which the gateway reported as 19:19 UTC.
+        self.assertEqual(self.client._action_log[0].timestamp, 1795202340 - 3600)
+        self.assertTrue(self.client._remote_access)
 
     def test_dropped_function_is_reported(self):
         self.gateway.drop_functions = True
