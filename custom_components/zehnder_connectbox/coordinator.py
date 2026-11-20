@@ -76,6 +76,9 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         # Temporary test build: outcome of the boost candidate writes, shown
         # in the diagnostics capture.
         self.candidate_writes: list[dict[str, object]] = []
+        # Temporary capture build: units whose app properties are read when
+        # the diagnostics are downloaded (see async_capture). Not stored.
+        self.capture_device_ids: set[int] = set()
 
     async def _async_update_data(self) -> GatewaySnapshot:
         now = time.monotonic()
@@ -294,7 +297,10 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         """Temporary capture build: read app properties and a fresh state.
 
         Used only when the diagnostics are downloaded. The app's properties are
-        requested for every ComfoSpot 50; nothing is written.
+        requested only for the ComfoSpot 50 units whose capture switch is on,
+        because every property read goes over the radio link and counts
+        against its duty cycle; nothing is written. The room model and run
+        state are always read fresh; they come from the gateway itself.
         """
         snapshot = self.data
         devices = (
@@ -306,6 +312,7 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
             (device.device_id, device.product_type, CAPTURE_PROPERTY_GROUPS)
             for device in devices
             if supports_sensor_status(device)
+            and device.device_id in self.capture_device_ids
         )
         deadline = time.monotonic() + CAPTURE_TIME_BUDGET
         async with self._io_lock:

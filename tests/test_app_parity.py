@@ -511,6 +511,22 @@ class EntityTests(unittest.TestCase):
         self.assertFalse(idle.is_on)
         self.assertIsNone(idle.extra_state_attributes["ends_at"])
 
+    def test_capture_switch_selects_the_unit(self):
+        coordinator = FakeCoordinator(snapshot(rooms_message()))
+        coordinator.capture_device_ids = set()
+        (entity,) = [
+            item
+            for item in set_up(switch, coordinator)
+            if isinstance(item, switch.ConnectBoxPropertyCaptureSwitch)
+        ]
+        entity.async_write_ha_state = Mock()
+        self.assertFalse(entity.is_on)
+        asyncio.run(entity.async_turn_on())
+        self.assertEqual(coordinator.capture_device_ids, {7})
+        self.assertTrue(entity.is_on)
+        asyncio.run(entity.async_turn_off())
+        self.assertEqual(coordinator.capture_device_ids, set())
+
     def test_boost_switch_needs_a_reported_duration(self):
         coordinator = FakeCoordinator(snapshot(rooms_message(boost_duration=None)))
         self.assertEqual(self.boost_switches(coordinator), [])
@@ -616,6 +632,16 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertGreater(log[0]["read_back"]["boost_ends_in_seconds"], 800)
 
+    async def test_capture_reads_only_the_selected_units(self):
+        self.client.capture = Mock(return_value=("state", (), {}))
+        await self.coordinator.async_capture()
+        targets = self.client.capture.call_args.args[0]
+        self.assertEqual(targets, ())
+        self.coordinator.capture_device_ids.add(7)
+        await self.coordinator.async_capture()
+        targets = self.client.capture.call_args.args[0]
+        self.assertEqual([(device_id, product) for device_id, product, _groups in targets], [(7, 30)])
+
     async def test_unsolicited_frames_are_copied_for_the_diagnostics(self):
         self.client._record_unsolicited(Operation(type=207), b"\x08\x01")
         frames = await self.coordinator.async_unsolicited_frames()
@@ -674,13 +700,14 @@ class UnsolicitedFrameTests(unittest.TestCase):
 
     def test_client_counts_frames_and_keeps_the_latest_bodies(self):
         client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
-        for index in range(5):
+        samples = client_mod.UNSOLICITED_SAMPLES
+        for index in range(samples + 2):
             client._record_unsolicited(Operation(type=207), bytes((8, index)))
         entry = client.unsolicited_frames[207]
-        self.assertEqual(entry.count, 5)
+        self.assertEqual(entry.count, samples + 2)
         self.assertEqual(
             [body for _at, _reference, _result, body in entry.last],
-            [bytes((8, index)) for index in (2, 3, 4)],
+            [bytes((8, index)) for index in range(2, samples + 2)],
         )
         for operation_type in range(1000, 1000 + client_mod.UNSOLICITED_TYPE_LIMIT + 5):
             client._record_unsolicited(Operation(type=operation_type), b"")

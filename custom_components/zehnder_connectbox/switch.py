@@ -14,7 +14,11 @@ from . import ZehnderConnectBoxConfigEntry
 from .const import CONF_GATEWAY_UUID
 from .entity import ConnectBoxDeviceEntity, ConnectBoxGatewayEntity
 from .models import GatewaySnapshot, RunMode
-from .profiles import supports_boost_candidates, supports_summer_ventilation
+from .profiles import (
+    supports_boost_candidates,
+    supports_sensor_status,
+    supports_summer_ventilation,
+)
 
 
 def _supports_summer_ventilation(snapshot: GatewaySnapshot) -> bool:
@@ -76,6 +80,29 @@ async def async_setup_entry(
 
     add_boost_switches()
     entry.async_on_unload(coordinator.async_add_listener(add_boost_switches))
+
+    # Temporary capture build: choose the units read for the diagnostics.
+    known_capture: set[int] = set()
+
+    @callback
+    def add_capture_switches() -> None:
+        if coordinator.data is None:
+            return
+        new_ids = {
+            device.device_id
+            for room in coordinator.data.rooms
+            for device in room.devices
+            if supports_sensor_status(device)
+        } - known_capture
+        if new_ids:
+            async_add_entities(
+                ConnectBoxPropertyCaptureSwitch(coordinator, device_id)
+                for device_id in sorted(new_ids)
+            )
+            known_capture.update(new_ids)
+
+    add_capture_switches()
+    entry.async_on_unload(coordinator.async_add_listener(add_capture_switches))
 
 
 class ConnectBoxVentilationSwitch(ConnectBoxGatewayEntity, SwitchEntity):
@@ -264,3 +291,35 @@ class ConnectBoxBoostSwitch(ConnectBoxDeviceEntity, SwitchEntity):
         data = self.device_data
         if data is not None:
             await self.coordinator.async_set_boost(data[0].room_id, False)
+
+
+class ConnectBoxPropertyCaptureSwitch(ConnectBoxDeviceEntity, SwitchEntity):
+    """Temporary capture build: read this unit's app properties for diagnostics.
+
+    Off by default and after a restart. While on, downloading the diagnostics
+    reads the app's property groups from this unit over the radio link.
+    """
+
+    _attr_translation_key = "property_capture"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_icon = "mdi:radio-tower"
+
+    def __init__(self, coordinator, device_id: int) -> None:
+        super().__init__(coordinator, device_id)
+        gateway_uuid = coordinator.entry.data[CONF_GATEWAY_UUID]
+        self._attr_unique_id = f"{gateway_uuid}_{device_id}_property_capture"
+
+    @property
+    def is_on(self) -> bool:
+        """Return whether the unit is read for the diagnostics."""
+        return self.device_id in self.coordinator.capture_device_ids
+
+    async def async_turn_on(self, **kwargs) -> None:
+        """Read this unit's app properties with the next diagnostics."""
+        self.coordinator.capture_device_ids.add(self.device_id)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Stop reading this unit's app properties."""
+        self.coordinator.capture_device_ids.discard(self.device_id)
+        self.async_write_ha_state()

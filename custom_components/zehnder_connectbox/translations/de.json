@@ -331,6 +331,9 @@
       },
       "boost": {
         "name": "Stoßlüftung"
+      },
+      "property_capture": {
+        "name": "Geräteeigenschaften mitlesen (Test)"
       }
     },
     "number": {

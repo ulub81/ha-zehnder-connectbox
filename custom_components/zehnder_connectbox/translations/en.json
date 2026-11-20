@@ -331,6 +331,9 @@
       },
       "boost": {
         "name": "Boost"
+      },
+      "property_capture": {
+        "name": "Read app properties (test)"
       }
     },
     "number": {

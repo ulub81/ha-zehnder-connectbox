@@ -104,7 +104,7 @@ def capture_value(raw: bytes) -> dict[str, int | str]:
 # Temporary capture build: frames without a matching request, per operation
 # type. Only the latest bodies of a type are kept.
 UNSOLICITED_TYPE_LIMIT = 64
-UNSOLICITED_SAMPLES = 3
+UNSOLICITED_SAMPLES = 8
 
 
 @dataclass(slots=True)
