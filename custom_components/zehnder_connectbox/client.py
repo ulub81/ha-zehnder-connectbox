@@ -32,13 +32,17 @@ from .profiles import (
     BOOST_DURATION_MAXIMUM,
     BOOST_DURATION_MINIMUM,
     BOOST_DURATION_STEP,
+    LEVEL_ONE_RUNTIME,
+    LEVEL_ONE_RUNTIME_VALUES,
     SUMMER_VENTILATION_ROLE,
     SUMMER_VENTILATION_ROLES,
     PropertySpec,
-    is_supported,
+    error_hours_property_specs_for_device,
     fan_state_property_specs_for_device,
+    is_supported,
     optional_property_specs_for_device,
     property_specs_for_device,
+    settings_property_specs_for_device,
     supports_boost_candidates,
     supports_sensor_mode,
     supports_summer_ventilation,
@@ -77,6 +81,15 @@ COMMAND_SETTLE_TIMEOUT = 10.0
 # A started boost may end this many seconds later than the room's duration
 # allows (clock differences) before it is stopped again as unexpected.
 BOOST_END_TOLERANCE = 300
+# Slow sequences read with the filter refresh, each in its own sequence after
+# the optional settings, so a unit that rejects one keeps its other telemetry.
+SLOW_PROPERTY_SEQUENCES: dict[str, Callable[[AttachedDevice], tuple[PropertySpec, ...]]] = {
+    "settings": settings_property_specs_for_device,
+    "error_hours": error_hours_property_specs_for_device,
+}
+# The app keeps up to eight weekly schedules.
+WEEK_PLAN_MINIMUM = 1
+WEEK_PLAN_MAXIMUM = 8
 # The app's manual mode offers the situations at home and away. The run-state
 # update carries them as the user location next to the run mode.
 SITUATION_LOCATIONS = {
@@ -155,6 +168,10 @@ class ConnectBoxClient:
         self._fully_requested_devices: set[tuple[int, int, int | None]] = set()
         self._rejected_optional_devices: set[tuple[int, int, int | None]] = set()
         self._rejected_fan_state_devices: set[tuple[int, int, int | None]] = set()
+        # Units that rejected one of the slow sequences, per sequence.
+        self._rejected_slow_devices: dict[str, set[tuple[int, int, int | None]]] = {
+            name: set() for name in SLOW_PROPERTY_SEQUENCES
+        }
         # Temporary capture build (see _record_unsolicited).
         self.unsolicited_frames: dict[int, UnsolicitedFrames] = {}
 
@@ -584,19 +601,66 @@ class ConnectBoxClient:
     ) -> GatewaySnapshot:
         """Write a unit's summer ventilation role and read it back.
 
-        The official app sets the role on the unit's settings page next to the
-        other single-room-unit properties. The role is written like the
-        filter runtime, as one device-property write with the key the gateway
-        reported, and is then requested again in its verified read sequence.
+        The official app sets the role on the unit's settings page; the value
+        written from here showed there. It is refused while a summer interval
+        runs.
         """
         if property_key.value_identity != SUMMER_VENTILATION_ROLE.key:
             raise ValueError("unexpected summer-role property")
         if role not in SUMMER_VENTILATION_ROLES:
             raise CommandValidationError("invalid_summer_role")
+        return self._write_optional_setting(
+            device_id,
+            property_key,
+            bytes((role,)),
+            unsupported_key="summer_role_unsupported",
+            check_run_state=lambda run_state: (
+                "summer_role_interval_active" if run_state.summer_ventilation else None
+            ),
+            label="summer ventilation role",
+        )
 
+    def set_level_one_runtime(
+        self, device_id: int, property_key: PropertyKey, minutes: int
+    ) -> GatewaySnapshot:
+        """Write a unit's runtime of level 1 per hour and read it back."""
+        if property_key.value_identity != LEVEL_ONE_RUNTIME.key:
+            raise ValueError("unexpected level-one runtime property")
+        if (
+            isinstance(minutes, bool)
+            or not isinstance(minutes, int)
+            or minutes not in LEVEL_ONE_RUNTIME_VALUES
+        ):
+            raise CommandValidationError("invalid_level_one_runtime")
+        return self._write_optional_setting(
+            device_id,
+            property_key,
+            bytes((minutes,)),
+            unsupported_key="level_one_runtime_unsupported",
+            label="level-one runtime",
+        )
+
+    def _write_optional_setting(
+        self,
+        device_id: int,
+        property_key: PropertyKey,
+        expected: bytes,
+        *,
+        unsupported_key: str,
+        label: str,
+        check_run_state: Callable[[RunState], str | None] | None = None,
+    ) -> GatewaySnapshot:
+        """Write one setting of the optional sequence (38.0.9-11) and read it back.
+
+        The setting is written like the filter runtime, as one device-property
+        write with the key the gateway reported, and then requested again in
+        its verified read sequence until the unit reports the written value.
+        """
         try:
-            if self._read_run_state().summer_ventilation:
-                raise CommandValidationError("summer_role_interval_active")
+            if check_run_state is not None:
+                refusal = check_run_state(self._read_run_state())
+                if refusal is not None:
+                    raise CommandValidationError(refusal)
             device = next(
                 (
                     item
@@ -609,11 +673,10 @@ class ConnectBoxClient:
             if device is None:
                 raise CommandValidationError("device_unavailable")
             if not optional_property_specs_for_device(device):
-                raise CommandValidationError("summer_role_unsupported")
+                raise CommandValidationError(unsupported_key)
             if property_key.product_type != device.product_type:
-                raise ProtocolError("summer-role property does not match the device")
+                raise ProtocolError(f"{label} property does not match the device")
 
-            expected = bytes((role,))
             self._connected_session().request(
                 OperationType.SET_DEVICE_PROPERTIES_REQUEST,
                 OperationType.SET_DEVICE_PROPERTIES_CONFIRM,
@@ -622,6 +685,7 @@ class ConnectBoxClient:
             self._request_properties(
                 device, optional_property_specs_for_device(device)
             )
+            identity = property_key.value_identity
             deadline = time.monotonic() + COMMAND_SETTLE_TIMEOUT
             while True:
                 rooms = self._read_rooms()
@@ -634,20 +698,14 @@ class ConnectBoxClient:
                     ),
                     None,
                 )
-                if (
-                    current is not None
-                    and current.property_bytes(SUMMER_VENTILATION_ROLE.key)
-                    == expected
-                ):
+                if current is not None and current.property_bytes(identity) == expected:
                     # Keep the read-back value for the following snapshots.
                     self._remember_device_properties(
                         self._restore_device_properties(rooms)
                     )
                     break
                 if time.monotonic() >= deadline:
-                    raise ProtocolError(
-                        "gateway did not report the written summer ventilation role"
-                    )
+                    raise ProtocolError(f"gateway did not report the written {label}")
                 time.sleep(LEVEL_SETTLE_POLL_INTERVAL)
             return self.read_snapshot(refresh_properties=False)
         except (ProtocolError, TransportError):
@@ -739,6 +797,40 @@ class ConnectBoxClient:
                     encode_room_boost(room_id, 0),
                 )
                 raise ProtocolError("gateway reported an unexpected boost end")
+            return self.read_snapshot(refresh_properties=False)
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    def set_week_plan(self, plan_id: int) -> GatewaySnapshot:
+        """Temporary test build: switch the active weekly schedule.
+
+        Candidate: the run-state update of the automatic mode with the plan in
+        field 5, where the run state reports the active plan. Confirmed only
+        when the gateway then reports the plan as active.
+        """
+        if (
+            isinstance(plan_id, bool)
+            or not isinstance(plan_id, int)
+            or not WEEK_PLAN_MINIMUM <= plan_id <= WEEK_PLAN_MAXIMUM
+        ):
+            raise CommandValidationError("invalid_week_plan")
+        try:
+            before = self._read_run_state()
+            if before.run_mode != RunMode.AUTOMATIC:
+                raise CommandValidationError("week_plan_mode_unavailable")
+            if before.week_plan == plan_id:
+                return self.read_snapshot(refresh_properties=False)
+            self._connected_session().request(
+                OperationType.SET_RUN_STATE_REQUEST,
+                OperationType.SET_RUN_STATE_CONFIRM,
+                encode_run_state(int(RunMode.AUTOMATIC), week_plan=plan_id),
+            )
+            after = self._wait_for(
+                self._read_run_state, lambda state: state.week_plan == plan_id
+            )
+            if after.week_plan != plan_id:
+                raise ProtocolError("gateway did not switch the weekly schedule")
             return self.read_snapshot(refresh_properties=False)
         except (ProtocolError, TransportError):
             self.close()
@@ -976,6 +1068,9 @@ class ConnectBoxClient:
         try:
             fan_state_devices: list[AttachedDevice] = []
             optional_devices: list[AttachedDevice] = []
+            slow_devices: dict[str, list[AttachedDevice]] = {
+                name: [] for name in SLOW_PROPERTY_SEQUENCES
+            }
             for device in devices:
                 device_key = self._property_cache_key(device)
                 request_filter_properties = (
@@ -1000,6 +1095,12 @@ class ConnectBoxClient:
                     and optional_property_specs_for_device(device)
                 ):
                     optional_devices.append(device)
+                if request_filter_properties and not expected_property_values:
+                    for name, specs_for in SLOW_PROPERTY_SEQUENCES.items():
+                        if device_key not in self._rejected_slow_devices[
+                            name
+                        ] and specs_for(device):
+                            slow_devices[name].append(device)
                 if request_filter_properties:
                     self._fully_requested_devices.add(device_key)
 
@@ -1034,9 +1135,25 @@ class ConnectBoxClient:
                     )
                     self.close()
                     return core_rooms
+            for name, specs_for in SLOW_PROPERTY_SEQUENCES.items():
+                for device in slow_devices[name]:
+                    try:
+                        self._request_properties(device, specs_for(device))
+                    except GatewayResponseError:
+                        # As above: skip this sequence for the unit until the
+                        # integration is reloaded.
+                        self._rejected_slow_devices[name].add(
+                            self._property_cache_key(device)
+                        )
+                        self.close()
+                        return core_rooms
 
             if not expected_property_values:
-                if fan_state_devices or optional_devices:
+                if (
+                    fan_state_devices
+                    or optional_devices
+                    or any(slow_devices.values())
+                ):
                     return self._read_rooms()
                 return core_rooms
 
@@ -1111,6 +1228,8 @@ class ConnectBoxClient:
         self._fully_requested_devices.intersection_update(connected)
         self._rejected_optional_devices.intersection_update(connected)
         self._rejected_fan_state_devices.intersection_update(connected)
+        for rejected in self._rejected_slow_devices.values():
+            rejected.intersection_update(connected)
         for room in rooms:
             for device in room.devices:
                 usable = tuple(value for value in device.properties if value.value)

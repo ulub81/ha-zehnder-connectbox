@@ -48,9 +48,21 @@ FILTER_RUNTIME = PropertySpec((38, 0, 15), 2)
 FILTER_REMAINING = PropertySpec((38, 0, 16), 2)
 FILTER_MAXIMUM = PropertySpec((38, 0, 17), 2)
 FILTER_PROPERTY_SPECS = (FILTER_RUNTIME, FILTER_REMAINING, FILTER_MAXIMUM)
+# The unit's error log, shown on its page in the official app as up to three
+# entries "PRID_SINGLE_VENT_UNIT.Error.<code>" with the operating hour at which
+# the error occurred: 37.n.1 is the code as a signed byte (133 shows as -123)
+# and 37.n.2 the operating hour. A ComfoSpot 50 without an active fault and
+# without a warning in the app reported three entries, so the log is history,
+# not the list of active faults (device field 10).
 ERROR_CODE_1 = PropertySpec((37, 0, 1), 1)
 ERROR_CODE_2 = PropertySpec((37, 1, 1), 1)
 ERROR_CODE_3 = PropertySpec((37, 2, 1), 1)
+ERROR_CODE_SPECS = (ERROR_CODE_1, ERROR_CODE_2, ERROR_CODE_3)
+ERROR_HOURS_SPECS = (
+    PropertySpec((37, 0, 2), 2),
+    PropertySpec((37, 1, 2), 2),
+    PropertySpec((37, 2, 2), 2),
+)
 
 PROPERTY_SPECS = (
     EXTRACT_AIR_TEMPERATURE,
@@ -81,15 +93,29 @@ SUMMER_VENTILATION_ROLES = {
     1: "supply",
     2: "exhaust",
 }
+# Settings on the unit's page in the official app, matched on one ComfoSpot 50:
+# the runtime of level 1 per hour in minutes (15, 30, 45 or 60; the app's
+# 45 min showed as 45), and the bath function, which the app shows as
+# "gesperrt" (locked) for 0 and does not let the user change.
+LEVEL_ONE_RUNTIME = PropertySpec((38, 0, 9), 1)
+LEVEL_ONE_RUNTIME_VALUES = (15, 30, 45, 60)
+BATH_FUNCTION = PropertySpec((38, 0, 10), 1)
+BATH_FUNCTION_STATES = {0: "locked", 1: "enabled"}
 # Read in their own sequence, so a unit that rejects them keeps its telemetry.
 # This three-item sequence was read successfully from five ComfoSpot 50 units;
-# a single-item read sequence has not been verified. The two neighbouring
-# settings are requested only to keep that verified sequence.
+# a single-item read sequence has not been verified.
 OPTIONAL_PROPERTY_SPECS = (
-    PropertySpec((38, 0, 9), 1),
-    PropertySpec((38, 0, 10), 1),
+    LEVEL_ONE_RUNTIME,
+    BATH_FUNCTION,
     SUMMER_VENTILATION_ROLE,
 )
+# The sensors used by the unit's automatic (sensor) operation, shown read-only
+# in the app as "Betriebs-Modus Automatik"; "beide" (both) was 3. Read with
+# its neighbour, the two-item sequence the official app reads, and the error
+# log's operating hours, both in their own slow sequences.
+AUTOMATIC_SENSORS = PropertySpec((38, 0, 14), 1)
+AUTOMATIC_SENSOR_STATES = {1: "humidity", 2: "air_quality", 3: "both"}
+SETTINGS_PROPERTY_SPECS = (PropertySpec((38, 0, 13), 1), AUTOMATIC_SENSORS)
 
 SUMMER_VENTILATION_ROLE_VALUES = {
     name: value for value, name in SUMMER_VENTILATION_ROLES.items()
@@ -193,6 +219,20 @@ FAN_STATE_PROPERTY_SPECS = (
 )
 
 
+def settings_property_specs_for_device(
+    device: AttachedDevice,
+) -> tuple[PropertySpec, ...]:
+    """Return the automatic-operation settings sequence for the checked profile."""
+    return SETTINGS_PROPERTY_SPECS if supports_sensor_status(device) else ()
+
+
+def error_hours_property_specs_for_device(
+    device: AttachedDevice,
+) -> tuple[PropertySpec, ...]:
+    """Return the error log's operating-hour sequence for the checked profile."""
+    return ERROR_HOURS_SPECS if supports_sensor_status(device) else ()
+
+
 def fan_state_property_specs_for_device(
     device: AttachedDevice,
 ) -> tuple[PropertySpec, ...]:
@@ -228,10 +268,7 @@ def summer_ventilation_role_key(device: AttachedDevice) -> PropertyKey | None:
     """
     if summer_ventilation_role(device) is None:
         return None
-    for prop in device.properties:
-        if prop.key.value_identity == SUMMER_VENTILATION_ROLE.key and prop.value:
-            return prop.key
-    return None
+    return _reported_key(device, SUMMER_VENTILATION_ROLE.key)
 
 
 def supports_boost_candidates(room: Room, device: AttachedDevice) -> bool:
@@ -337,13 +374,81 @@ def product_name(device: AttachedDevice) -> str:
 
 
 def has_fault(device: AttachedDevice) -> bool:
-    """Return whether any reported device fault is active."""
-    if any(code != 0 for code in device.errors):
-        return True
-    return any(
-        (spec.value(device) or 0) != 0
-        for spec in (ERROR_CODE_1, ERROR_CODE_2, ERROR_CODE_3)
-    )
+    """Return whether the gateway reports an active fault of the unit.
+
+    Only the device's error list counts; the unit's error log (class 37) is
+    history, see ERROR_CODE_SPECS.
+    """
+    return any(code != 0 for code in device.errors)
+
+
+def error_log(device: AttachedDevice) -> list[dict[str, int | None]]:
+    """Return the unit's logged errors with the operating hour, newest first.
+
+    Codes are signed bytes as the app shows them; empty entries (code 0) are
+    left out.
+    """
+    entries: list[dict[str, int | None]] = []
+    for code_spec, hours_spec in zip(ERROR_CODE_SPECS, ERROR_HOURS_SPECS, strict=True):
+        raw = device.property_bytes(code_spec.key)
+        if not raw:
+            continue
+        code = int.from_bytes(raw[:1], "little", signed=True)
+        if code == 0:
+            continue
+        hours_raw = device.property_bytes(hours_spec.key)
+        entries.append(
+            {
+                "code": code,
+                "operating_hours": (
+                    int.from_bytes(hours_raw[:4], "little")
+                    if hours_raw
+                    else None
+                ),
+            }
+        )
+    return entries
+
+
+def level_one_runtime(device: AttachedDevice) -> int | None:
+    """Return the runtime of level 1 per hour in minutes, if reported."""
+    if not supports_sensor_status(device):
+        return None
+    value = LEVEL_ONE_RUNTIME.value(device)
+    return value if value in LEVEL_ONE_RUNTIME_VALUES else None
+
+
+def level_one_runtime_key(device: AttachedDevice) -> PropertyKey | None:
+    """Return the key under which the unit reports the runtime, for a write."""
+    if level_one_runtime(device) is None:
+        return None
+    return _reported_key(device, LEVEL_ONE_RUNTIME.key)
+
+
+def bath_function(device: AttachedDevice) -> str | None:
+    """Return the bath function state as the app shows it, if known."""
+    if not supports_sensor_status(device):
+        return None
+    value = BATH_FUNCTION.value(device)
+    return BATH_FUNCTION_STATES.get(value) if value is not None else None
+
+
+def automatic_sensors(device: AttachedDevice) -> str | None:
+    """Return which sensors the automatic operation uses, if known."""
+    if not supports_sensor_status(device):
+        return None
+    value = AUTOMATIC_SENSORS.value(device)
+    return AUTOMATIC_SENSOR_STATES.get(value) if value is not None else None
+
+
+def _reported_key(
+    device: AttachedDevice, identity: tuple[int, int, int]
+) -> PropertyKey | None:
+    """Return the full key of a property the gateway reported with a value."""
+    for prop in device.properties:
+        if prop.key.value_identity == identity and prop.value:
+            return prop.key
+    return None
 
 
 def has_filter_warning(device: AttachedDevice) -> bool | None:

@@ -11,13 +11,20 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import ZehnderConnectBoxConfigEntry
 from .const import CONF_GATEWAY_UUID, DOMAIN
 from .entity import ConnectBoxDeviceEntity, ConnectBoxGatewayEntity
+from .models import RunMode
 from .profiles import (
     BOOST_DURATION_MAXIMUM,
     BOOST_DURATION_MINIMUM,
     BOOST_DURATION_STEP,
+    LEVEL_ONE_RUNTIME_VALUES,
+    level_one_runtime,
+    level_one_runtime_key,
     supports_boost_candidates,
     supports_summer_ventilation,
 )
+
+WEEK_PLAN_MINIMUM = 1
+WEEK_PLAN_MAXIMUM = 8
 
 
 async def async_setup_entry(
@@ -68,6 +75,44 @@ async def async_setup_entry(
 
     add_boost_durations()
     entry.async_on_unload(coordinator.async_add_listener(add_boost_durations))
+
+    # Runtime of level 1 per hour of each unit that reports it.
+    known_runtime: set[int] = set()
+
+    @callback
+    def add_level_one_runtimes() -> None:
+        if coordinator.data is None:
+            return
+        new_ids = {
+            device.device_id
+            for room in coordinator.data.rooms
+            for device in room.devices
+            if level_one_runtime_key(device) is not None
+        } - known_runtime
+        if new_ids:
+            async_add_entities(
+                ConnectBoxLevelOneRuntime(coordinator, device_id)
+                for device_id in sorted(new_ids)
+            )
+            known_runtime.update(new_ids)
+
+    add_level_one_runtimes()
+    entry.async_on_unload(coordinator.async_add_listener(add_level_one_runtimes))
+
+    # Temporary test build: active weekly schedule, once the gateway reports it.
+    week_plan_added = False
+
+    @callback
+    def add_week_plan() -> None:
+        nonlocal week_plan_added
+        snapshot = coordinator.data
+        if week_plan_added or snapshot is None or snapshot.run_state.week_plan is None:
+            return
+        async_add_entities([ConnectBoxWeekPlan(coordinator)])
+        week_plan_added = True
+
+    add_week_plan()
+    entry.async_on_unload(coordinator.async_add_listener(add_week_plan))
 
 
 class ConnectBoxSummerVentilationDuration(ConnectBoxGatewayEntity, NumberEntity):
@@ -166,3 +211,92 @@ class ConnectBoxBoostDuration(ConnectBoxDeviceEntity, NumberEntity):
         if data is None:
             return
         await self.coordinator.async_set_boost_duration(data[0].room_id, int(value))
+
+
+class ConnectBoxLevelOneRuntime(ConnectBoxDeviceEntity, NumberEntity):
+    """Runtime of level 1 per hour, as set on the unit's page in the app."""
+
+    _attr_translation_key = "level_one_runtime"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_device_class = NumberDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_native_min_value = LEVEL_ONE_RUNTIME_VALUES[0]
+    _attr_native_max_value = LEVEL_ONE_RUNTIME_VALUES[-1]
+    _attr_native_step = LEVEL_ONE_RUNTIME_VALUES[1] - LEVEL_ONE_RUNTIME_VALUES[0]
+    _attr_icon = "mdi:fan-clock"
+
+    def __init__(self, coordinator, device_id: int) -> None:
+        super().__init__(coordinator, device_id)
+        gateway_uuid = coordinator.entry.data[CONF_GATEWAY_UUID]
+        self._attr_unique_id = f"{gateway_uuid}_{device_id}_level_one_runtime"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the runtime the unit reports."""
+        data = self.device_data
+        return level_one_runtime(data[1]) if data is not None else None
+
+    @property
+    def available(self) -> bool:
+        """Only allow a change while the unit reports the runtime."""
+        if not super().available:
+            return False
+        data = self.device_data
+        return data is not None and level_one_runtime_key(data[1]) is not None
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Write one of the app's values (15, 30, 45 or 60 minutes)."""
+        if not float(value).is_integer() or int(value) not in LEVEL_ONE_RUNTIME_VALUES:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_level_one_runtime"
+            )
+        if int(value) == self.native_value:
+            return
+        await self.coordinator.async_set_level_one_runtime(self.device_id, int(value))
+
+
+class ConnectBoxWeekPlan(ConnectBoxGatewayEntity, NumberEntity):
+    """Temporary test build: number of the active weekly schedule.
+
+    The run state reports the active weekly schedule; the app numbers them in
+    its list order. Changing it sends a candidate write whose outcome is
+    listed in the diagnostics capture.
+    """
+
+    _attr_translation_key = "week_plan"
+    _attr_native_min_value = WEEK_PLAN_MINIMUM
+    _attr_native_max_value = WEEK_PLAN_MAXIMUM
+    _attr_native_step = 1
+    _attr_icon = "mdi:calendar-week"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        gateway_uuid = coordinator.entry.data[CONF_GATEWAY_UUID]
+        self._attr_unique_id = f"{gateway_uuid}_week_plan"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the active weekly schedule."""
+        snapshot = self.coordinator.data
+        return snapshot.run_state.week_plan if snapshot is not None else None
+
+    @property
+    def available(self) -> bool:
+        """Only offer a change in the app's schedule mode."""
+        snapshot = self.coordinator.data
+        return bool(
+            super().available
+            and snapshot is not None
+            and snapshot.run_state.week_plan is not None
+            and snapshot.run_state.run_mode == RunMode.AUTOMATIC
+        )
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Switch the weekly schedule."""
+        if not float(value).is_integer() or not (
+            WEEK_PLAN_MINIMUM <= value <= WEEK_PLAN_MAXIMUM
+        ):
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_week_plan"
+            )
+        await self.coordinator.async_set_week_plan(int(value))

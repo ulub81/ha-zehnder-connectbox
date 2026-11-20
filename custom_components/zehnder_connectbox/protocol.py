@@ -10,6 +10,7 @@ from uuid import UUID
 from .const import SENSOR_MODE_LEVEL, VENTILATION_LEVELS
 from .models import (
     AttachedDevice,
+    DayPlan,
     PropertyKey,
     PropertyValue,
     Room,
@@ -20,6 +21,7 @@ from .models import (
 )
 from .protobuf import (
     Field,
+    ProtobufDecodeError,
     WireType,
     bytes_value,
     bytes_values,
@@ -234,6 +236,34 @@ def decode_run_state(message: bytes) -> RunState:
         summer_ventilation_end=uint_value(fields, 13),
         errors=uint_values(fields, 11),
         raw=inner,
+        week_plan=uint_value(fields, 5),
+        day_plan=_decode_day_plan(bytes_value(fields, 4)),
+    )
+
+
+def _decode_day_plan(message: bytes | None) -> DayPlan | None:
+    """Decode today's daily schedule from the run state, if reported."""
+    if not message:
+        return None
+    try:
+        fields = decode_fields(message)
+        plan_id = uint_value(fields, 1)
+        if plan_id is None:
+            return None
+        raw_name = bytes_value(fields, 2)
+        slots: list[tuple[int, int]] = []
+        for slot in bytes_values(fields, 3):
+            slot_fields = decode_fields(slot)
+            # A zero start or situation is omitted from the wire.
+            slots.append(
+                (uint_value(slot_fields, 1) or 0, uint_value(slot_fields, 2) or 0)
+            )
+    except ProtobufDecodeError:
+        return None
+    return DayPlan(
+        plan_id=plan_id,
+        name=raw_name.decode(errors="replace") if raw_name else None,
+        slots=tuple(slots),
     )
 
 
@@ -264,13 +294,27 @@ def encode_summer_ventilation_settings(enabled: bool, duration_hours: int) -> by
 
 
 def encode_run_state(
-    run_mode: int, user_location: int = 1, *, summer_active: bool | None = None
+    run_mode: int,
+    user_location: int = 1,
+    *,
+    summer_active: bool | None = None,
+    week_plan: int | None = None,
 ) -> bytes:
-    """Build a system run-state update with an optional summer toggle."""
+    """Build a system run-state update with an optional summer toggle.
+
+    week_plan is a candidate of the test build: the run state reports the
+    active weekly schedule in field 5, so the update carries it in the same
+    field.
+    """
     body = encode_uint(1, run_mode) + encode_uint(2, user_location)
     if summer_active is not None:
         body += encode_uint(3, int(summer_active))
+    if week_plan is not None:
+        body += encode_uint(WEEK_PLAN_UPDATE_FIELD, week_plan)
     return body
+
+
+WEEK_PLAN_UPDATE_FIELD = 5
 
 
 def decode_rooms(message: bytes) -> tuple[Room, ...]:

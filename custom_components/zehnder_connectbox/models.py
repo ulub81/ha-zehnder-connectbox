@@ -60,6 +60,21 @@ class VersionInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class DayPlan:
+    """Today's daily schedule as the run state reports it.
+
+    Each slot is (minute of the day, situation) with the situations of
+    TemperatureMode: switching the app between its winter and summer weekly
+    schedules changed the plan from (0 asleep, 480 awake, 1260 asleep) to
+    (0 asleep, 480 away, 1350 awake), matching the app's daily schedules.
+    """
+
+    plan_id: int
+    name: str | None
+    slots: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RunState:
     """Current system-wide ConnectBox state."""
 
@@ -72,6 +87,10 @@ class RunState:
     errors: tuple[int, ...]
     # Temporary capture build: the undecoded run-state message.
     raw: bytes = field(default=b"", repr=False, compare=False)
+    week_plan: int | None = None
+    """ID of the active weekly schedule (1 and 2 in the app's order)."""
+    day_plan: DayPlan | None = None
+    """Today's daily schedule of the active weekly schedule."""
 
     def summer_ventilation_running(self, now: float) -> bool | None:
         """Interpret the reported flag together with its expiry time."""

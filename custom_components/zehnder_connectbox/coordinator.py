@@ -38,6 +38,7 @@ from .profiles import (
     CAPTURE_TIME_BUDGET,
     FILTER_RUNTIME,
     format_version,
+    level_one_runtime_key,
     product_name,
     summer_ventilation_role_key,
     supports_sensor_status,
@@ -219,6 +220,24 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         )
         self._accept_command_snapshot(snapshot)
 
+    async def async_set_level_one_runtime(self, device_id: int, minutes: int) -> None:
+        """Write a unit's runtime of level 1 per hour and confirm it."""
+        data = self.data.find_device(device_id) if self.data is not None else None
+        if data is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="device_unavailable"
+            )
+        key = level_one_runtime_key(data[1])
+        if key is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="level_one_runtime_unavailable",
+            )
+        snapshot = await self._async_execute_command(
+            partial(self.client.set_level_one_runtime, device_id, key, minutes)
+        )
+        self._accept_command_snapshot(snapshot)
+
     async def async_set_boost_duration(self, room_id: int, minutes: int) -> None:
         """Temporary test build: write a room's boost duration and log it."""
         await self._async_boost_candidate(
@@ -256,11 +275,50 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         The log is listed in the diagnostics capture under candidate_writes,
         with the gateway's answer and the boost values it reports afterwards.
         """
+
+        def read_back(snapshot: GatewaySnapshot) -> dict[str, object] | None:
+            room = next(
+                (item for item in snapshot.rooms if item.room_id == room_id), None
+            )
+            if room is None:
+                return None
+            return {
+                "boost_duration": room.boost_duration,
+                "boost_ends_in_seconds": (
+                    room.boost_until - int(time.time()) if room.boost_until else None
+                ),
+            }
+
+        await self._async_logged_write(
+            {"room": room_id, "write": write, "value": value}, command, read_back
+        )
+
+    async def async_set_week_plan(self, plan_id: int) -> None:
+        """Temporary test build: switch the active weekly schedule and log it."""
+
+        def read_back(snapshot: GatewaySnapshot) -> dict[str, object]:
+            day_plan = snapshot.run_state.day_plan
+            return {
+                "week_plan": snapshot.run_state.week_plan,
+                "day_plan": day_plan.plan_id if day_plan is not None else None,
+            }
+
+        await self._async_logged_write(
+            {"write": "week_plan", "value": plan_id},
+            partial(self.client.set_week_plan, plan_id),
+            read_back,
+        )
+
+    async def _async_logged_write(
+        self,
+        details: dict[str, object],
+        command: Callable[[], GatewaySnapshot],
+        read_back: Callable[[GatewaySnapshot], dict[str, object] | None],
+    ) -> None:
+        """Run a write and log its outcome under candidate_writes."""
         record: dict[str, object] = {
             "at": dt_util.utcnow().isoformat(timespec="seconds"),
-            "room": room_id,
-            "write": write,
-            "value": value,
+            **details,
             "result": "pending",
         }
         self.candidate_writes.append(record)
@@ -277,18 +335,9 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
                 record["result"] = type(err).__name__
             raise
         record["result"] = "confirmed"
-        room = next(
-            (item for item in snapshot.rooms if item.room_id == room_id), None
-        )
-        if room is not None:
-            record["read_back"] = {
-                "boost_duration": room.boost_duration,
-                "boost_ends_in_seconds": (
-                    room.boost_until - int(time.time())
-                    if room.boost_until
-                    else None
-                ),
-            }
+        values = read_back(snapshot)
+        if values is not None:
+            record["read_back"] = values
         self._accept_command_snapshot(snapshot)
 
     async def async_capture(

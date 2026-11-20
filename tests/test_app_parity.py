@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import Mock, patch
@@ -14,7 +15,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
 from custom_components.zehnder_connectbox import client as client_mod
-from custom_components.zehnder_connectbox import diagnostics, number, select, switch
+from custom_components.zehnder_connectbox import (
+    diagnostics,
+    number,
+    profiles,
+    select,
+    sensor,
+    status,
+    switch,
+)
 from custom_components.zehnder_connectbox.client import CaptureError, ConnectBoxClient
 from custom_components.zehnder_connectbox.coordinator import (
     ZehnderConnectBoxCoordinator,
@@ -41,7 +50,9 @@ from custom_components.zehnder_connectbox.protocol import (
     OperationType,
     ProtocolError,
     decode_rooms,
+    decode_run_state,
     encode_room_boost,
+    encode_run_state,
     encode_room_number_update,
 )
 from custom_components.zehnder_connectbox.session import (
@@ -63,20 +74,24 @@ def property_record(identity, value):
     return encode_bytes(101, encode_bytes(1, key) + encode_bytes(2, value))
 
 
-def rooms_message(*, role=1, boost_duration=15, boost_until=None):
+def rooms_message(
+    *, role=1, boost_duration=15, boost_until=None, runtime=60, extra=(), errors=()
+):
     """One room with one ComfoSpot 50 in the shape the gateway reports."""
     device = [
         encode_uint(1, 7),
         encode_string(2, "SERIAL-0001"),
         encode_uint(5, 30),
+        *(encode_uint(10, code) for code in errors),
         encode_uint(30, 9),
         encode_uint(31, 1),
         encode_uint(41, 1234),
-        property_record((38, 0, 9), b"\x3c"),
+        property_record((38, 0, 9), bytes((runtime,))),
         property_record((38, 0, 10), b"\x00"),
     ]
     if role is not None:
         device.append(property_record(ROLE, bytes((role,))))
+    device.extend(property_record(identity, value) for identity, value in extra)
     device.append(encode_uint(110, 1))
     room = [
         encode_uint(1, 3),
@@ -132,7 +147,10 @@ class FakeGateway:
             self.room["boost_duration"] = uint_value(written_room(body), 22)
         if request is OperationType.SET_DEVICE_PROPERTIES_REQUEST:
             record = decode_fields(bytes_value(decode_fields(body), 3))
-            self.room["role"] = bytes_value(record, 2)[0]
+            key = decode_fields(bytes_value(record, 1))
+            identity = tuple(uint_value(key, number) for number in (4, 5, 6))
+            name = {ROLE: "role", (38, 0, 9): "runtime"}[identity]
+            self.room[name] = bytes_value(record, 2)[0]
         if request is OperationType.SET_ROOM_VALUE_REQUEST:
             until = uint_value(written_room(body), 15)
             self.room["boost_until"] = until + self.boost_shift if until else None
@@ -860,6 +878,321 @@ class CaptureRobustnessTests(unittest.TestCase):
             capture["error"], "CaptureError: TransportError: gateway read failed"
         )
         self.assertEqual(capture["group_errors"], {"7": ["38.0.9: x"]})
+
+
+# --- unit settings, error log, schedules ------------------------------------------
+
+
+ERROR_LOG = (
+    ((37, 0, 1), b"\x85"),
+    ((37, 1, 1), b"\x85"),
+    ((37, 2, 1), b"\x00"),
+    ((37, 0, 2), (27733).to_bytes(2, "little")),
+    ((37, 1, 2), (10505).to_bytes(2, "little")),
+    ((37, 2, 2), b"\x00\x00"),
+)
+
+
+def device_of(message):
+    (room,) = decode_rooms(message)
+    return room.devices[0]
+
+
+class ProfileTests(unittest.TestCase):
+    def test_error_log_is_history_with_signed_codes(self):
+        device = device_of(rooms_message(extra=ERROR_LOG))
+        self.assertEqual(
+            profiles.error_log(device),
+            [
+                {"code": -123, "operating_hours": 27733},
+                {"code": -123, "operating_hours": 10505},
+            ],
+        )
+        self.assertFalse(profiles.has_fault(device))
+        self.assertEqual(status.error_codes(device), [])
+        active = device_of(rooms_message(extra=ERROR_LOG, errors=(4, 4)))
+        self.assertTrue(profiles.has_fault(active))
+        self.assertEqual(status.error_codes(active), [4])
+
+    def test_unit_settings(self):
+        device = device_of(
+            rooms_message(runtime=45, extra=(((38, 0, 13), b"\x00"), ((38, 0, 14), b"\x03")))
+        )
+        self.assertEqual(profiles.level_one_runtime(device), 45)
+        self.assertEqual(profiles.level_one_runtime_key(device).value_identity, (38, 0, 9))
+        self.assertEqual(profiles.bath_function(device), "locked")
+        self.assertEqual(profiles.automatic_sensors(device), "both")
+        odd = device_of(rooms_message(runtime=50, extra=(((38, 0, 14), b"\x07"),)))
+        self.assertIsNone(profiles.level_one_runtime(odd))
+        self.assertIsNone(profiles.level_one_runtime_key(odd))
+        self.assertIsNone(profiles.automatic_sensors(odd))
+
+
+def run_state_message(*, week_plan=1, slots=((0, 1), (480, 0), (1260, 1)), name=b"Wintertagesplan"):
+    plan = encode_uint(1, week_plan) + encode_bytes(2, name)
+    for minute, mode in slots:
+        slot = (encode_uint(1, minute) if minute else b"") + (
+            encode_uint(2, mode) if mode else b""
+        )
+        plan += encode_bytes(3, slot)
+    inner = b"".join(
+        (
+            encode_uint(1, 1),
+            encode_uint(2, 0),
+            encode_uint(3, 1),
+            encode_bytes(4, plan),
+            encode_uint(5, week_plan),
+            encode_uint(6, 3),
+            encode_uint(12, 0),
+        )
+    )
+    return encode_bytes(1, inner)
+
+
+class ScheduleProtocolTests(unittest.TestCase):
+    def test_run_state_reports_week_and_day_plan(self):
+        state = decode_run_state(run_state_message())
+        self.assertEqual(state.week_plan, 1)
+        self.assertEqual(state.day_plan.plan_id, 1)
+        self.assertEqual(state.day_plan.name, "Wintertagesplan")
+        self.assertEqual(state.day_plan.slots, ((0, 1), (480, 0), (1260, 1)))
+        summer = decode_run_state(
+            run_state_message(week_plan=2, slots=((0, 1), (480, 2), (1350, 0)))
+        )
+        self.assertEqual((summer.week_plan, summer.day_plan.slots[1]), (2, (480, 2)))
+
+    def test_run_state_without_plan(self):
+        inner = encode_uint(1, 2) + encode_uint(2, 0)
+        state = decode_run_state(encode_bytes(1, inner))
+        self.assertIsNone(state.week_plan)
+        self.assertIsNone(state.day_plan)
+
+    def test_run_state_update_carries_the_week_plan_candidate(self):
+        fields = decode_fields(encode_run_state(1, week_plan=2))
+        self.assertEqual(
+            [(field.number, field.value) for field in fields], [(1, 1), (2, 1), (5, 2)]
+        )
+        self.assertEqual(len(decode_fields(encode_run_state(1))), 2)
+
+
+class SettingClientTests(FastSettle):
+    def runtime_key(self, client):
+        (room,) = client._read_rooms()
+        return next(
+            value.key
+            for value in room.devices[0].properties
+            if value.key.value_identity == (38, 0, 9)
+        )
+
+    def test_writes_the_runtime_and_reads_it_back(self):
+        gateway = FakeGateway(runtime=45)
+        client = make_client(gateway)
+        self.assertEqual(
+            client.set_level_one_runtime(7, self.runtime_key(client), 60), "snapshot"
+        )
+        write = gateway.requests[0]
+        self.assertIs(write[0], OperationType.SET_DEVICE_PROPERTIES_REQUEST)
+        record = decode_fields(bytes_value(decode_fields(write[1]), 3))
+        self.assertEqual(bytes_value(record, 2), b"\x3c")
+        self.assertEqual(gateway.room["runtime"], 60)
+
+    def test_refuses_values_the_app_does_not_offer(self):
+        gateway = FakeGateway(runtime=45)
+        client = make_client(gateway)
+        key = self.runtime_key(client)
+        for minutes in (0, 10, 50, 90, True):
+            with self.subTest(minutes=minutes):
+                with self.assertRaises(CommandValidationError):
+                    client.set_level_one_runtime(7, key, minutes)
+        with self.assertRaises(ValueError):
+            client.set_level_one_runtime(7, PropertyKey(30, 255, 0, *ROLE), 60)
+        self.assertEqual(gateway.requests, [])
+
+    def test_reports_a_runtime_the_unit_did_not_take_over(self):
+        client = make_client(FakeGateway(runtime=45, apply=False))
+        client.close = Mock()
+        with self.assertRaisesRegex(ProtocolError, "level-one runtime"):
+            client.set_level_one_runtime(7, self.runtime_key(client), 60)
+
+
+class SlowSequenceTests(unittest.TestCase):
+    def make(self, reject=()):
+        client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
+        sent = []
+        client.close = Mock()
+
+        def request(request, confirm, body=b"", **_kwargs):
+            fields = decode_fields(body)
+            key = decode_fields(bytes_value(fields, 3))
+            identity = tuple(uint_value(key, number) for number in (4, 5, 6))
+            sent.append(identity)
+            if identity in reject:
+                raise GatewayResponseError(2, None)
+            return SimpleNamespace(body=b"")
+
+        client._connected_session = lambda: SimpleNamespace(request=request)
+        client._read_rooms = lambda: decode_rooms(rooms_message())
+        return client, sent
+
+    def test_settings_and_error_hours_follow_with_the_slow_refresh(self):
+        client, sent = self.make()
+        rooms = decode_rooms(rooms_message())
+        client._read_device_properties(rooms, include_filter_properties=True)
+        self.assertEqual(
+            sent[-5:],
+            [(38, 0, 13), (38, 0, 14), (37, 0, 2), (37, 1, 2), (37, 2, 2)],
+        )
+        sent.clear()
+        client._read_device_properties(rooms, include_filter_properties=False)
+        self.assertNotIn((38, 0, 14), sent)
+        self.assertNotIn((37, 0, 2), sent)
+
+    def test_a_rejected_sequence_is_skipped_until_reload(self):
+        client, sent = self.make(reject={(38, 0, 13)})
+        rooms = decode_rooms(rooms_message())
+        client._read_device_properties(rooms, include_filter_properties=True)
+        client.close.assert_called_once_with()
+        self.assertNotIn((37, 0, 2), sent)
+        sent.clear()
+        client._read_device_properties(rooms, include_filter_properties=True)
+        self.assertNotIn((38, 0, 13), sent)
+        self.assertIn((37, 0, 2), sent)
+
+
+class WeekPlanClientTests(FastSettle):
+    def make(self, *, run_mode=1, apply=True):
+        state = {"week_plan": 1, "run_mode": run_mode}
+        requests = []
+
+        def request(request, confirm, body=b"", **_kwargs):
+            requests.append((request, body))
+            if apply:
+                state["week_plan"] = uint_value(decode_fields(body), 5)
+            return SimpleNamespace(body=b"")
+
+        client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
+        client._connected_session = lambda: SimpleNamespace(request=request)
+        client._read_run_state = lambda: replace(
+            run_state(run_mode=state["run_mode"]), week_plan=state["week_plan"]
+        )
+        client.read_snapshot = lambda **_kwargs: "snapshot"
+        client.close = Mock()
+        return client, state, requests
+
+    def test_switches_the_week_plan_in_schedule_mode(self):
+        client, state, requests = self.make()
+        self.assertEqual(client.set_week_plan(2), "snapshot")
+        ((request, body),) = requests
+        self.assertIs(request, OperationType.SET_RUN_STATE_REQUEST)
+        fields = decode_fields(body)
+        self.assertEqual((uint_value(fields, 1), uint_value(fields, 5)), (1, 2))
+        self.assertEqual(state["week_plan"], 2)
+
+    def test_does_not_write_the_active_plan_or_outside_schedule_mode(self):
+        client, _state, requests = self.make()
+        self.assertEqual(client.set_week_plan(1), "snapshot")
+        client, _state, requests2 = self.make(run_mode=2)
+        with self.assertRaises(CommandValidationError) as raised:
+            client.set_week_plan(2)
+        self.assertEqual(raised.exception.translation_key, "week_plan_mode_unavailable")
+        for plan in (0, 9, True):
+            with self.subTest(plan=plan), self.assertRaises(CommandValidationError):
+                client.set_week_plan(plan)
+        self.assertEqual(requests + requests2, [])
+
+    def test_reports_a_plan_the_gateway_did_not_take_over(self):
+        client, _state, _requests = self.make(apply=False)
+        with self.assertRaisesRegex(ProtocolError, "weekly schedule"):
+            client.set_week_plan(2)
+        client.close.assert_called_once_with()
+
+
+class ScheduleAndSettingEntityTests(unittest.TestCase):
+    def snapshot_with_plan(self, message, **kwargs):
+        data = snapshot(message, **kwargs)
+        return replace(
+            data,
+            run_state=replace(
+                decode_run_state(run_state_message()), run_mode=kwargs.get("run_mode", 1)
+            ),
+        )
+
+    def test_level_one_runtime_number(self):
+        coordinator = FakeCoordinator(snapshot(rooms_message(runtime=45)))
+        coordinator.calls = []
+
+        async def write(device_id, minutes):
+            coordinator.calls.append((device_id, minutes))
+
+        coordinator.async_set_level_one_runtime = write
+        (entity,) = [
+            item
+            for item in set_up(number, coordinator)
+            if isinstance(item, number.ConnectBoxLevelOneRuntime)
+        ]
+        self.assertEqual(entity.native_value, 45)
+        self.assertEqual(
+            (entity.native_min_value, entity.native_max_value, entity.native_step),
+            (15, 60, 15),
+        )
+        asyncio.run(entity.async_set_native_value(60.0))
+        asyncio.run(entity.async_set_native_value(45.0))
+        self.assertEqual(coordinator.calls, [(7, 60)])
+        for value in (20, 37.5, 90):
+            with self.subTest(value=value), self.assertRaises(ServiceValidationError):
+                asyncio.run(entity.async_set_native_value(value))
+
+    def test_week_plan_number_follows_the_run_state(self):
+        coordinator = FakeCoordinator(self.snapshot_with_plan(rooms_message()))
+        calls = []
+
+        async def write(plan):
+            calls.append(plan)
+
+        coordinator.async_set_week_plan = write
+        (entity,) = [
+            item
+            for item in set_up(number, coordinator)
+            if isinstance(item, number.ConnectBoxWeekPlan)
+        ]
+        self.assertEqual(entity.native_value, 1)
+        self.assertTrue(entity.available)
+        asyncio.run(entity.async_set_native_value(2.0))
+        self.assertEqual(calls, [2])
+        coordinator.data = self.snapshot_with_plan(rooms_message(), run_mode=2)
+        self.assertFalse(entity.available)
+
+    def test_setting_error_log_and_day_plan_sensors(self):
+        message = rooms_message(
+            extra=(*ERROR_LOG, ((38, 0, 13), b"\x00"), ((38, 0, 14), b"\x03"))
+        )
+        coordinator = FakeCoordinator(self.snapshot_with_plan(message))
+        entities = set_up(sensor, coordinator)
+        by_key = {
+            getattr(getattr(entity, "entity_description", None), "key", None): entity
+            for entity in entities
+        }
+        self.assertEqual(by_key["bath_function"].native_value, "locked")
+        self.assertEqual(by_key["automatic_sensors"].native_value, "both")
+        self.assertEqual(by_key["error_log"].native_value, 2)
+        self.assertEqual(
+            by_key["error_log"].extra_state_attributes["entries"][0],
+            {"code": -123, "operating_hours": 27733},
+        )
+        plan = next(e for e in entities if isinstance(e, sensor.ConnectBoxDayPlanSensor))
+        self.assertEqual(plan.native_value, "Wintertagesplan")
+        self.assertEqual(
+            plan.extra_state_attributes,
+            {
+                "day_plan": 1,
+                "week_plan": 1,
+                "slots": [
+                    {"start": "00:00", "situation": "asleep"},
+                    {"start": "08:00", "situation": "awake"},
+                    {"start": "21:00", "situation": "asleep"},
+                ],
+            },
+        )
 
 
 if __name__ == "__main__":
