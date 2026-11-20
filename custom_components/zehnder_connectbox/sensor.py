@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ from .entity import (
     ConnectBoxGatewayEntity,
     supported_device_ids,
 )
-from .models import AttachedDevice, DayPlan, GatewaySnapshot, Room
+from .models import ActionLogEntry, AttachedDevice, DayPlan, GatewaySnapshot, Room
 from .profiles import (
     AUTOMATIC_SENSOR_STATES,
     BATH_FUNCTION_STATES,
@@ -311,6 +312,11 @@ async def async_setup_entry(
         ):
             new_entities.append(ConnectBoxWeekPlanSensor(coordinator))
             known.add((0, "week_plan"))
+        # The app's history, once the gateway reports it.
+        if (0, "history") not in known and coordinator.data.action_log is not None:
+            new_entities.append(ConnectBoxHistorySensor(coordinator))
+            new_entities.append(ConnectBoxDutyCycleSensor(coordinator))
+            known.add((0, "history"))
         if new_entities:
             async_add_entities(new_entities)
 
@@ -563,4 +569,153 @@ class ConnectBoxWeekPlanSensor(ConnectBoxGatewayEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Report unavailable while the active schedule is not known."""
+        return super().available and self.native_value is not None
+
+
+# The gateway logs the radio duty cycle in its history under this nickname,
+# with a message such as "53 24h:53 MAX:55".
+DUTY_CYCLE_NICKNAME = "ComfoRF DUTY CYCLE"
+DUTY_CYCLE_PATTERN = re.compile(r"^\s*(\d+)\s+24h:\s*(\d+)\s+MAX:\s*(\d+)\s*$")
+HISTORY_STATE_MAX_LENGTH = 255
+
+
+def _is_duty_cycle(entry: ActionLogEntry) -> bool:
+    return entry.nickname == DUTY_CYCLE_NICKNAME
+
+
+def _history_entry(entry: ActionLogEntry) -> dict[str, object]:
+    return {
+        "time": _timestamp(entry.timestamp),
+        "by": entry.nickname,
+        "event": entry.message,
+        "details": list(entry.params),
+    }
+
+
+def _timestamp(value: int | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromtimestamp(value, UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+class ConnectBoxHistorySensor(ConnectBoxGatewayEntity, SensorEntity):
+    """The app's history (Verlauf): the latest change and recent entries.
+
+    The state is the latest change with its details, such as
+    "CHANGED_DAYPLAN: Test"; who made it and when are attributes, next to
+    all entries the gateway returned. Duty-cycle entries of the radio are
+    left out of the state; they have their own sensor.
+    """
+
+    _attr_translation_key = "history"
+    _attr_icon = "mdi:history"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        gateway_uuid = coordinator.entry.data[CONF_GATEWAY_UUID]
+        self._attr_unique_id = f"{gateway_uuid}_history"
+
+    def _latest(self) -> ActionLogEntry | None:
+        snapshot = self.coordinator.data
+        log = snapshot.action_log if snapshot is not None else None
+        if not log:
+            return None
+        changes = [entry for entry in log if not _is_duty_cycle(entry)]
+        return max(changes, key=lambda entry: entry.timestamp or 0, default=None)
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the latest change."""
+        entry = self._latest()
+        if entry is None or not entry.message:
+            return None
+        text = entry.message
+        if entry.params:
+            text = f"{text}: {', '.join(entry.params)}"
+        return text[:HISTORY_STATE_MAX_LENGTH]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object] | None:
+        """Return who made the latest change, when, and all entries."""
+        snapshot = self.coordinator.data
+        if snapshot is None or snapshot.action_log is None:
+            return None
+        latest = self._latest()
+        return {
+            "by": latest.nickname if latest else None,
+            "time": _timestamp(latest.timestamp) if latest else None,
+            "entries": [
+                _history_entry(entry)
+                for entry in snapshot.action_log
+                if not _is_duty_cycle(entry)
+            ],
+        }
+
+    @property
+    def available(self) -> bool:
+        """Report unavailable while the gateway does not report its history."""
+        snapshot = self.coordinator.data
+        return (
+            super().available
+            and snapshot is not None
+            and snapshot.action_log is not None
+        )
+
+
+class ConnectBoxDutyCycleSensor(ConnectBoxGatewayEntity, SensorEntity):
+    """The radio duty cycle the gateway logs in its history.
+
+    The gateway logs three numbers, such as "53 24h:53 MAX:55": the state is
+    the first, the attributes are the 24-hour value and the maximum, with
+    the time of the entry. They are shown as logged, in percent.
+    """
+
+    _attr_translation_key = "radio_duty_cycle"
+    _attr_icon = "mdi:radio-tower"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        gateway_uuid = coordinator.entry.data[CONF_GATEWAY_UUID]
+        self._attr_unique_id = f"{gateway_uuid}_radio_duty_cycle"
+
+    def _latest(self) -> tuple[ActionLogEntry, re.Match[str]] | None:
+        snapshot = self.coordinator.data
+        log = snapshot.action_log if snapshot is not None else None
+        found = [
+            (entry, match)
+            for entry in log or ()
+            if _is_duty_cycle(entry)
+            and entry.message
+            and (match := DUTY_CYCLE_PATTERN.match(entry.message))
+        ]
+        return max(found, key=lambda item: item[0].timestamp or 0, default=None)
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the current duty cycle."""
+        latest = self._latest()
+        return int(latest[1].group(1)) if latest else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object] | None:
+        """Return the 24-hour value, the maximum and the entry's time."""
+        latest = self._latest()
+        if latest is None:
+            return None
+        entry, match = latest
+        return {
+            "last_24_hours": int(match.group(2)),
+            "maximum": int(match.group(3)),
+            "time": _timestamp(entry.timestamp),
+        }
+
+    @property
+    def available(self) -> bool:
+        """Report unavailable until the gateway logged a duty cycle."""
         return super().available and self.native_value is not None

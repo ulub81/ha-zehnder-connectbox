@@ -9,6 +9,7 @@ from uuid import UUID
 
 from .const import SENSOR_MODE_LEVEL, VENTILATION_LEVELS
 from .models import (
+    ActionLogEntry,
     AttachedDevice,
     DayPlan,
     PropertyKey,
@@ -72,12 +73,32 @@ class OperationType(IntEnum):
     VERSION_CONFIRM = 68
     REMOTE_ACCESS_REQUEST = 140
     REMOTE_ACCESS_CONFIRM = 142
-    # The gateway sent the notification with all schedules whenever the
-    # official app saved a daily schedule; the request two numbers below it
-    # returned the same list, like the room and run-state requests.
+    # Schedule operations, numbered as in the official app's message table
+    # (GetSchedule, LockDayplan, SetDayplan, ...). The gateway sends the
+    # notification with all schedules whenever a client changed one.
+    LOCK_DAY_PLAN_REQUEST = 150
+    LOCK_DAY_PLAN_CONFIRM = 151
+    RELEASE_DAY_PLAN_REQUEST = 152
+    RELEASE_DAY_PLAN_CONFIRM = 153
+    LOCK_WEEK_PLAN_REQUEST = 154
+    LOCK_WEEK_PLAN_CONFIRM = 155
+    RELEASE_WEEK_PLAN_REQUEST = 156
+    RELEASE_WEEK_PLAN_CONFIRM = 157
     SCHEDULES_REQUEST = 158
     SCHEDULES_CONFIRM = 159
     SCHEDULES_NOTIFICATION = 160
+    REMOVE_DAY_PLAN_REQUEST = 165
+    REMOVE_DAY_PLAN_CONFIRM = 166
+    REMOVE_WEEK_PLAN_REQUEST = 167
+    REMOVE_WEEK_PLAN_CONFIRM = 168
+    ADD_DAY_PLAN_REQUEST = 169
+    ADD_DAY_PLAN_CONFIRM = 170
+    ADD_WEEK_PLAN_REQUEST = 171
+    ADD_WEEK_PLAN_CONFIRM = 172
+    SET_DAY_PLAN_REQUEST = 173
+    SET_DAY_PLAN_CONFIRM = 174
+    SET_WEEK_PLAN_REQUEST = 175
+    SET_WEEK_PLAN_CONFIRM = 176
     ROOMS_REQUEST = 194
     ROOMS_CONFIRM = 195
     SET_ROOM_REQUEST = 203
@@ -88,6 +109,13 @@ class OperationType(IntEnum):
     RUN_STATE_CONFIRM = 241
     SET_RUN_STATE_REQUEST = 243
     SET_RUN_STATE_CONFIRM = 244
+    SET_ACTIVE_WEEK_PLAN_REQUEST = 245
+    SET_ACTIVE_WEEK_PLAN_CONFIRM = 246
+    ACTION_LOG_REQUEST = 290
+    ACTION_LOG_CONFIRM = 291
+    ACTION_LOG_NOTIFICATION = 292
+    SET_STANDBY_TIME_RANGE_REQUEST = 330
+    SET_STANDBY_TIME_RANGE_CONFIRM = 331
     SUMMER_VENTILATION_REQUEST = 354
     SUMMER_VENTILATION_CONFIRM = 355
     SET_SUMMER_VENTILATION_REQUEST = 356
@@ -248,6 +276,8 @@ def decode_run_state(message: bytes) -> RunState:
         # Field 5 repeats the ID of today's daily schedule (field 4).
         week_plan=uint_value(fields, 6),
         day_plan=_decode_day_plan(bytes_value(fields, 4)),
+        standby_start=uint_value(fields, 9),
+        standby_end=uint_value(fields, 10),
     )
 
 
@@ -277,6 +307,7 @@ def _decode_day_plan(message: bytes | None) -> DayPlan | None:
                     function=uint_value(entry_fields, 2) or 0,
                     duration_minutes=uint_value(entry_fields, 3) or 0,
                     room_id=uint_value(entry_fields, 4) or 0,
+                    device_id=uint_value(entry_fields, 5) or 0,
                 )
             )
     except ProtobufDecodeError:
@@ -289,7 +320,27 @@ def _decode_day_plan(message: bytes | None) -> DayPlan | None:
     )
 
 
+# MondayId to SundayId of the app's weekly schedule message.
 WEEK_PLAN_DAY_FIELDS = (3, 4, 5, 6, 7, 8, 9)
+PLAN_NAME_MAX_BYTES = 32
+
+
+def _decode_week_plan(message: bytes | None) -> WeekPlan | None:
+    """Decode a weekly schedule from the schedule list or a confirmation."""
+    if not message:
+        return None
+    week_fields = decode_fields(message)
+    plan_id = uint_value(week_fields, 1)
+    if plan_id is None:
+        return None
+    raw_name = bytes_value(week_fields, 2)
+    return WeekPlan(
+        plan_id=plan_id,
+        name=raw_name.decode(errors="replace") if raw_name else None,
+        days=tuple(
+            uint_value(week_fields, number) or 0 for number in WEEK_PLAN_DAY_FIELDS
+        ),
+    )
 
 
 def decode_schedules(message: bytes) -> Schedules:
@@ -300,24 +351,148 @@ def decode_schedules(message: bytes) -> Schedules:
         for value in bytes_values(fields, 1)
         if (plan := _decode_day_plan(value)) is not None
     )
-    week_plans: list[WeekPlan] = []
-    for value in bytes_values(fields, 2):
-        week_fields = decode_fields(value)
-        plan_id = uint_value(week_fields, 1)
-        if plan_id is None:
-            continue
-        raw_name = bytes_value(week_fields, 2)
-        week_plans.append(
-            WeekPlan(
-                plan_id=plan_id,
-                name=raw_name.decode(errors="replace") if raw_name else None,
-                days=tuple(
-                    uint_value(week_fields, number) or 0
-                    for number in WEEK_PLAN_DAY_FIELDS
+    week_plans = tuple(
+        plan
+        for value in bytes_values(fields, 2)
+        if (plan := _decode_week_plan(value)) is not None
+    )
+    return Schedules(day_plans=day_plans, week_plans=week_plans)
+
+
+def decode_day_plan_confirm(message: bytes) -> DayPlan:
+    """Decode the daily schedule an add or change confirmation returns.
+
+    The confirmation leaves out the plan's timed functions.
+    """
+    plan = _decode_day_plan(bytes_value(decode_fields(message), 1))
+    if plan is None:
+        raise ProtocolError("missing daily schedule")
+    return plan
+
+
+def decode_week_plan_confirm(message: bytes) -> WeekPlan:
+    """Decode the weekly schedule an add or change confirmation returns."""
+    plan = _decode_week_plan(bytes_value(decode_fields(message), 1))
+    if plan is None:
+        raise ProtocolError("missing weekly schedule")
+    return plan
+
+
+def _check_uint(value: object, label: str, maximum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{label} must not exceed {maximum}")
+    return value
+
+
+def _plan_name(name: str) -> bytes:
+    raw = name.encode()
+    if not raw or len(raw) > PLAN_NAME_MAX_BYTES:
+        raise ValueError(f"plan names must have 1 to {PLAN_NAME_MAX_BYTES} bytes")
+    return raw
+
+
+def encode_day_plan(plan: DayPlan) -> bytes:
+    """Build an add or change request for a complete daily schedule.
+
+    Every value is written, zeros included, as the gateway reports them. The
+    plan ID is 0 for a new plan; the gateway assigns one and returns it. The
+    app's change request replaces the whole plan, so the timed functions must
+    be sent again to keep them.
+    """
+    message = bytearray(encode_uint(1, _check_uint(plan.plan_id, "plan ID")))
+    message.extend(encode_bytes(2, _plan_name(plan.name or "")))
+    for minute, mode in plan.slots:
+        slot = encode_uint(1, _check_uint(minute, "start", 1439)) + encode_uint(
+            2, _check_uint(mode, "situation")
+        )
+        message.extend(encode_bytes(3, slot))
+    for item in plan.functions:
+        entry = b"".join(
+            (
+                encode_uint(1, _check_uint(item.start_minute, "start", 1439)),
+                encode_uint(2, _check_uint(item.function, "function")),
+                encode_uint(3, _check_uint(item.duration_minutes, "duration")),
+                encode_uint(4, _check_uint(item.room_id, "room")),
+                encode_uint(5, _check_uint(item.device_id, "device")),
+            )
+        )
+        message.extend(encode_bytes(20, entry))
+    return encode_bytes(1, bytes(message))
+
+
+def encode_week_plan(plan: WeekPlan) -> bytes:
+    """Build an add or change request for a weekly schedule (Monday first)."""
+    if len(plan.days) != len(WEEK_PLAN_DAY_FIELDS):
+        raise ValueError("a weekly schedule needs one daily schedule per day")
+    message = bytearray(encode_uint(1, _check_uint(plan.plan_id, "plan ID")))
+    message.extend(encode_bytes(2, _plan_name(plan.name or "")))
+    for number, day_plan in zip(WEEK_PLAN_DAY_FIELDS, plan.days, strict=True):
+        message.extend(encode_uint(number, _check_uint(day_plan, "daily schedule")))
+    return encode_bytes(1, bytes(message))
+
+
+def encode_plan_id(plan_id: int) -> bytes:
+    """Build a lock, release, read or remove request for one schedule."""
+    return encode_uint(1, _check_uint(plan_id, "plan ID"))
+
+
+def encode_active_week_plan(plan_id: int) -> bytes:
+    """Build the request that makes a weekly schedule the active one."""
+    return encode_uint(1, _check_uint(plan_id, "plan ID"))
+
+
+def encode_standby_time_range(enabled: bool, start: int, end: int) -> bytes:
+    """Build the absence planner's update (mode, start and end as Unix time).
+
+    The app's message names the fields mode, startDateTime and endDateTime.
+    Mode 1 with a period was reported back as the saved planner; mode 0
+    switched it off again.
+    """
+    if not isinstance(enabled, bool):
+        raise TypeError("enabled must be a boolean")
+    return b"".join(
+        (
+            encode_uint(1, int(enabled)),
+            encode_uint(2, _check_uint(start, "start")),
+            encode_uint(3, _check_uint(end, "end")),
+        )
+    )
+
+
+def decode_action_log(message: bytes) -> tuple[ActionLogEntry, ...]:
+    """Decode the gateway's history, newest entry first as reported."""
+    entries: list[ActionLogEntry] = []
+    for value in bytes_values(decode_fields(message), 1):
+        fields = decode_fields(value)
+        nickname = bytes_value(fields, 1)
+        text = bytes_value(fields, 3)
+        entries.append(
+            ActionLogEntry(
+                nickname=nickname.decode(errors="replace") if nickname else None,
+                timestamp=uint_value(fields, 2),
+                message=text.decode(errors="replace") if text else None,
+                params=tuple(
+                    item.decode(errors="replace")
+                    for item in bytes_values(fields, 4)
+                    if item
                 ),
             )
         )
-    return Schedules(day_plans=day_plans, week_plans=tuple(week_plans))
+    return tuple(entries)
+
+
+def decode_remote_access(message: bytes) -> bool | None:
+    """Decode whether access over the internet is enabled.
+
+    The app's enumeration has AccessEnabled = 0 and AccessDisabled = 1; the
+    gateway reported 0 while the app showed the access switched on.
+    """
+    value = uint_value(decode_fields(message), 1)
+    if value is None:
+        return None
+    return value == 0
 
 
 def decode_summer_ventilation_settings(message: bytes) -> SummerVentilationSettings:

@@ -90,14 +90,15 @@ class ScheduledFunction:
     function: int
     duration_minutes: int
     room_id: int
+    device_id: int = 0
+    """Device of the function; the app's entries all reported 0."""
 
 
 @dataclass(frozen=True, slots=True)
 class WeekPlan:
-    """A weekly schedule: one daily schedule per day, in the gateway's order.
+    """A weekly schedule: one daily schedule per day, Monday to Sunday.
 
-    The app shows the days Monday to Sunday; the order of the seven values was
-    not checked, because both schedules used one daily schedule for all days.
+    The app's message names the seven fields MondayId to SundayId.
     """
 
     plan_id: int
@@ -124,6 +125,22 @@ class Schedules:
 
 
 @dataclass(frozen=True, slots=True)
+class ActionLogEntry:
+    """One entry of the app's history (Verlauf).
+
+    The gateway logs every change with the nickname of the paired client
+    (such as "Home Assistant"), the time as Unix time, a message key such as
+    CHANGED_DAYPLAN and its parameters, such as the plan's name. It also logs
+    the radio duty cycle with the nickname "ComfoRF DUTY CYCLE".
+    """
+
+    nickname: str | None
+    timestamp: int | None
+    message: str | None
+    params: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class RunState:
     """Current system-wide ConnectBox state."""
 
@@ -144,6 +161,20 @@ class RunState:
     """
     day_plan: DayPlan | None = None
     """Today's daily schedule of the active weekly schedule."""
+    standby_start: int | None = None
+    """Start of the absence planner's period as Unix time (field 9).
+
+    Saving the app's absence planner for 04.12. 19:15 to 05.12. 19:15 (CET)
+    set field 8 to 1 and fields 9 and 10 to these times as Unix time; field 7
+    (standbyModeActive in the app) stayed 0 before the period.
+    """
+    standby_end: int | None = None
+    """End of the absence planner's period as Unix time (field 10)."""
+
+    @property
+    def absence_planned(self) -> bool | None:
+        """Return whether the absence planner is switched on."""
+        return bool(self.standby_mode) if self.standby_mode is not None else None
 
     def summer_ventilation_running(self, now: float) -> bool | None:
         """Interpret the reported flag together with its expiry time."""
@@ -282,6 +313,8 @@ class GatewaySnapshot:
     rooms: tuple[Room, ...]
     summer_ventilation_settings: SummerVentilationSettings | None = None
     schedules: Schedules | None = None
+    action_log: tuple[ActionLogEntry, ...] | None = None
+    remote_access: bool | None = None
 
     def find_device(self, device_id: int) -> tuple[Room, AttachedDevice] | None:
         """Find a device together with its containing room."""

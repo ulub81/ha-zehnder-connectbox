@@ -15,6 +15,13 @@ project follows [Semantic Versioning](https://semver.org/).
 - List the active fault codes on the fault sensor.
 - Add icons for the ventilation levels, fan speeds, filter values and end
   times.
+- Select the active weekly schedule, as on the app's plan page.
+- Add the app's absence planner: a switch with start and end, and an
+  indicator while the absence runs.
+- Add services to add, change and remove daily schedules (switching times
+  and timed boost or summer ventilation) and weekly schedules.
+- Show the app's history (Verlauf), the radio duty cycle the ConnectBox logs
+  and whether access over the internet is enabled.
 
 ### Changed
 

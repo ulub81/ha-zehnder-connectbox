@@ -711,21 +711,6 @@ class TestRequestTests(unittest.TestCase):
                 with self.assertRaises(error):
                     session.request(194, 195)
 
-    def test_client_closes_after_a_refused_test_request(self):
-        client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
-        client.close = Mock()
-        answers = [
-            SimpleNamespace(operation=Operation(type=241), body=b"ok"),
-            SimpleNamespace(operation=Operation(type=300, result=2), body=b""),
-        ]
-        client._connected_session = lambda: SimpleNamespace(
-            exchange=lambda *_args, **_kwargs: answers.pop(0)
-        )
-        self.assertEqual(client.test_request(240, b""), (241, None, None, b"ok"))
-        client.close.assert_not_called()
-        self.assertEqual(client.test_request(299, b""), (300, 2, None, b""))
-        client.close.assert_called_once_with()
-
     def test_structure_shows_text_only_on_request(self):
         body = encode_uint(1, 2) + encode_string(2, "Sommertagesplan")
         self.assertEqual(

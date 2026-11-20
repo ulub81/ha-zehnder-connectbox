@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from uuid import UUID, uuid4
 
@@ -16,7 +17,9 @@ from .const import (
 )
 from .errors import CommandValidationError
 from .models import (
+    ActionLogEntry,
     AttachedDevice,
+    DayPlan,
     GatewaySnapshot,
     PairingData,
     PropertyKey,
@@ -24,10 +27,12 @@ from .models import (
     Room,
     RunMode,
     RunState,
+    ScheduledFunction,
     Schedules,
     SummerVentilationSettings,
     TemperatureMode,
     VersionInfo,
+    WeekPlan,
 )
 from .profiles import (
     BOOST_DURATION_MAXIMUM,
@@ -55,21 +60,30 @@ from .protocol import (
     OperationType,
     PropertySequenceCommand,
     ProtocolError,
+    decode_action_log,
+    decode_day_plan_confirm,
     decode_pairing,
+    decode_remote_access,
     decode_rooms,
     decode_run_state,
     decode_schedules,
     decode_summer_ventilation_settings,
     decode_version,
+    decode_week_plan_confirm,
+    encode_active_week_plan,
+    encode_day_plan,
     encode_filter_reset_room,
     encode_pairing,
+    encode_plan_id,
     encode_property_request,
     encode_property_update,
     encode_room_boost,
     encode_room_level,
     encode_room_number_update,
     encode_run_state,
+    encode_standby_time_range,
     encode_summer_ventilation_settings,
+    encode_week_plan,
 )
 from .session import ConnectBoxSession, GatewayResponseError
 from .transport import ConnectBoxTransport, TransportError
@@ -87,7 +101,14 @@ BOOST_END_TOLERANCE = 300
 SCHEDULES_REFRESH_INTERVAL = 15 * 60.0
 SCHEDULES_REQUEST_TIMEOUT = 4.0
 SCHEDULES_RETRY_INTERVAL = 60.0
-TEST_REQUEST_TIMEOUT = 6.0
+# The history and the internet-access setting are stored on the gateway, so
+# reading them does not use the radio link. The history is read again after
+# the gateway announced a new entry and otherwise every few minutes.
+ACTION_LOG_REFRESH_INTERVAL = 5 * 60.0
+ACTION_LOG_RETRY_INTERVAL = 60.0
+# Gateway results of the app's enumeration (LOCKED, NOT_EXIST).
+RESULT_NOT_EXIST = 7
+RESULT_LOCKED = 9
 # Slow sequences read with the filter refresh, each in its own sequence after
 # the optional settings, so a unit that rejects one keeps its other telemetry.
 SLOW_PROPERTY_SEQUENCES: dict[str, Callable[[AttachedDevice], tuple[PropertySpec, ...]]] = {
@@ -131,6 +152,16 @@ class UnsolicitedFrames:
     count: int = 0
     last: deque[tuple[float, int | None, int | None, bytes]] = field(
         default_factory=lambda: deque(maxlen=UNSOLICITED_SAMPLES)
+    )
+
+
+def _function_order(item: ScheduledFunction) -> tuple[int, int, int, int, int]:
+    return (
+        item.start_minute,
+        item.function,
+        item.duration_minutes,
+        item.room_id,
+        item.device_id,
     )
 
 
@@ -182,6 +213,12 @@ class ConnectBoxClient:
         self._schedules_read: float | None = None
         self._schedules_unsupported = False
         self._schedules_retry_after = 0.0
+        self._action_log: tuple[ActionLogEntry, ...] | None = None
+        self._remote_access: bool | None = None
+        self._action_log_read: float | None = None
+        self._action_log_unsupported = False
+        self._remote_access_unsupported = False
+        self._action_log_retry_after = 0.0
 
     @classmethod
     def pair(
@@ -288,8 +325,16 @@ class ConnectBoxClient:
                 if refresh_schedules
                 else self._schedules
             )
+            if refresh_schedules:
+                self._read_action_log()
             return GatewaySnapshot(
-                version, run_state, rooms, summer_settings, schedules
+                version,
+                run_state,
+                rooms,
+                summer_settings,
+                schedules,
+                self._action_log,
+                self._remote_access,
             )
         except (ProtocolError, TransportError):
             self.close()
@@ -822,22 +867,230 @@ class ConnectBoxClient:
             self.close()
             raise
 
-    def test_request(
-        self, request_type: int, body: bytes
-    ) -> tuple[int, int | None, str | None, bytes]:
-        """Temporary test build: send one request and return what answers it."""
+    def set_active_week_plan(self, plan_id: int) -> GatewaySnapshot:
+        """Make a weekly schedule the active one, as the app's plan page does.
+
+        The gateway confirmed the request and then reported the schedule's ID
+        in the run state (field 6), together with today's daily schedule.
+        """
         try:
-            response = self._connected_session().exchange(
-                request_type, body, timeout=TEST_REQUEST_TIMEOUT
+            schedules = self._schedules
+            if schedules is not None and schedules.week_plan(plan_id) is None:
+                raise CommandValidationError("week_plan_unknown")
+            self._connected_session().request(
+                OperationType.SET_ACTIVE_WEEK_PLAN_REQUEST,
+                OperationType.SET_ACTIVE_WEEK_PLAN_CONFIRM,
+                encode_active_week_plan(plan_id),
             )
+            run_state = self._wait_for(
+                self._read_run_state, lambda state: state.week_plan == plan_id
+            )
+            if run_state.week_plan != plan_id:
+                raise ProtocolError("gateway did not activate the weekly schedule")
+            return self.read_snapshot(refresh_properties=False)
         except (ProtocolError, TransportError):
             self.close()
             raise
-        operation = response.operation
-        if operation.result not in (None, 0):
-            # A refused request may leave a sequence open on the gateway.
+
+    def set_absence(
+        self, enabled: bool, start: int | None = None, end: int | None = None
+    ) -> GatewaySnapshot:
+        """Save or switch off the absence planner and read it back.
+
+        Switched on, the gateway puts the system into frost protection for the
+        period, as the app explains on the planner's page. A period that is
+        not given is kept as reported; switching off sends the reported period
+        with mode 0, as tested.
+        """
+        try:
+            before = self._read_run_state()
+            start = start if start is not None else before.standby_start
+            end = end if end is not None else before.standby_end
+            if enabled:
+                if start is None or end is None:
+                    raise CommandValidationError("absence_period_missing")
+                if end <= start:
+                    raise CommandValidationError("absence_period_invalid")
+                if end <= time.time():
+                    raise CommandValidationError("absence_period_past")
+            else:
+                start = start or 0
+                end = end or 0
+            self._connected_session().request(
+                OperationType.SET_STANDBY_TIME_RANGE_REQUEST,
+                OperationType.SET_STANDBY_TIME_RANGE_CONFIRM,
+                encode_standby_time_range(enabled, start, end),
+            )
+
+            def saved(state: RunState) -> bool:
+                if not enabled:
+                    return state.absence_planned is False
+                return (
+                    state.absence_planned is True
+                    and state.standby_start == start
+                    and state.standby_end == end
+                )
+
+            run_state = self._wait_for(self._read_run_state, saved)
+            if not saved(run_state):
+                raise ProtocolError("gateway did not report the absence planner")
+            return self.read_snapshot(refresh_properties=False)
+        except (ProtocolError, TransportError):
             self.close()
-        return operation.type, operation.result, operation.description, response.body
+            raise
+
+    def save_day_plan(self, plan: DayPlan) -> tuple[GatewaySnapshot, int]:
+        """Add (plan ID 0) or replace a daily schedule and check the result.
+
+        A change is made under the schedule's lock, like the app does, so a
+        plan another client is editing is refused. The stored schedule is read
+        back from the schedule list, which also holds the timed functions.
+        """
+        expected_slots = tuple(sorted(plan.slots))
+        expected_functions = sorted(plan.functions, key=lambda item: item.start_minute)
+        plan = replace(plan, slots=expected_slots, functions=tuple(expected_functions))
+        try:
+            session = self._connected_session()
+            if plan.plan_id == 0:
+                response = session.request(
+                    OperationType.ADD_DAY_PLAN_REQUEST,
+                    OperationType.ADD_DAY_PLAN_CONFIRM,
+                    encode_day_plan(plan),
+                )
+                plan_id = decode_day_plan_confirm(response.body).plan_id
+            else:
+                plan_id = plan.plan_id
+                with self._plan_lock(plan_id, week=False):
+                    session.request(
+                        OperationType.SET_DAY_PLAN_REQUEST,
+                        OperationType.SET_DAY_PLAN_CONFIRM,
+                        encode_day_plan(plan),
+                    )
+            stored = self._reload_schedules().day_plan(plan_id)
+            if (
+                stored is None
+                or stored.name != plan.name
+                or tuple(sorted(stored.slots)) != expected_slots
+                or sorted(stored.functions, key=_function_order)
+                != sorted(plan.functions, key=_function_order)
+            ):
+                raise ProtocolError(
+                    "gateway did not store the daily schedule as written"
+                )
+            return self.read_snapshot(refresh_properties=False), plan_id
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    def save_week_plan(self, plan: WeekPlan) -> tuple[GatewaySnapshot, int]:
+        """Add (plan ID 0) or replace a weekly schedule and check the result."""
+        try:
+            session = self._connected_session()
+            if plan.plan_id == 0:
+                response = session.request(
+                    OperationType.ADD_WEEK_PLAN_REQUEST,
+                    OperationType.ADD_WEEK_PLAN_CONFIRM,
+                    encode_week_plan(plan),
+                )
+                plan_id = decode_week_plan_confirm(response.body).plan_id
+            else:
+                plan_id = plan.plan_id
+                with self._plan_lock(plan_id, week=True):
+                    session.request(
+                        OperationType.SET_WEEK_PLAN_REQUEST,
+                        OperationType.SET_WEEK_PLAN_CONFIRM,
+                        encode_week_plan(plan),
+                    )
+            stored = self._reload_schedules().week_plan(plan_id)
+            if stored is None or (stored.name, stored.days) != (plan.name, plan.days):
+                raise ProtocolError(
+                    "gateway did not store the weekly schedule as written"
+                )
+            return self.read_snapshot(refresh_properties=False), plan_id
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    def remove_plan(self, plan_id: int, *, week: bool) -> GatewaySnapshot:
+        """Remove a daily or weekly schedule and check that it is gone.
+
+        The gateway refused (result 12) to remove a daily schedule that a
+        weekly schedule still used.
+        """
+        try:
+            session = self._connected_session()
+            with self._plan_lock(plan_id, week=week):
+                session.request(
+                    OperationType.REMOVE_WEEK_PLAN_REQUEST
+                    if week
+                    else OperationType.REMOVE_DAY_PLAN_REQUEST,
+                    OperationType.REMOVE_WEEK_PLAN_CONFIRM
+                    if week
+                    else OperationType.REMOVE_DAY_PLAN_CONFIRM,
+                    encode_plan_id(plan_id),
+                )
+            schedules = self._reload_schedules()
+            remaining = (
+                schedules.week_plan(plan_id) if week else schedules.day_plan(plan_id)
+            )
+            if remaining is not None:
+                raise ProtocolError("gateway still lists the removed schedule")
+            return self.read_snapshot(refresh_properties=False)
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    @contextmanager
+    def _plan_lock(self, plan_id: int, *, week: bool) -> Iterator[None]:
+        """Hold a schedule's lock while it is changed, then release it."""
+        session = self._connected_session()
+        if week:
+            lock = (
+                OperationType.LOCK_WEEK_PLAN_REQUEST,
+                OperationType.LOCK_WEEK_PLAN_CONFIRM,
+            )
+            release = (
+                OperationType.RELEASE_WEEK_PLAN_REQUEST,
+                OperationType.RELEASE_WEEK_PLAN_CONFIRM,
+            )
+        else:
+            lock = (
+                OperationType.LOCK_DAY_PLAN_REQUEST,
+                OperationType.LOCK_DAY_PLAN_CONFIRM,
+            )
+            release = (
+                OperationType.RELEASE_DAY_PLAN_REQUEST,
+                OperationType.RELEASE_DAY_PLAN_CONFIRM,
+            )
+        try:
+            session.request(*lock, encode_plan_id(plan_id))
+        except GatewayResponseError as err:
+            if err.result == RESULT_LOCKED:
+                raise CommandValidationError("plan_locked") from err
+            if err.result == RESULT_NOT_EXIST:
+                raise CommandValidationError("plan_unknown") from err
+            raise
+        try:
+            yield
+        finally:
+            try:
+                session.request(*release, encode_plan_id(plan_id))
+            except (GatewayResponseError, ProtocolError, TransportError):
+                # The connection is closed after a failure, which ends the
+                # session and with it the lock.
+                self.close()
+
+    def _reload_schedules(self) -> Schedules:
+        """Read the schedule list now, after this client changed it."""
+        response = self._connected_session().request(
+            OperationType.SCHEDULES_REQUEST,
+            OperationType.SCHEDULES_CONFIRM,
+            timeout=SCHEDULES_REQUEST_TIMEOUT,
+        )
+        self._schedules = decode_schedules(response.body)
+        self._schedules_read = time.monotonic()
+        self._schedules_unsupported = False
+        return self._schedules
 
     def _find_room(self, room_id: int) -> Room | None:
         """Read the rooms and return one of them."""
@@ -1022,6 +1275,65 @@ class ConnectBoxClient:
         if operation.type == OperationType.SCHEDULES_NOTIFICATION:
             # A client changed a schedule; read the list again.
             self._schedules_read = None
+        elif operation.type == OperationType.ACTION_LOG_NOTIFICATION:
+            # The gateway logged a new entry; read the history again.
+            self._action_log_read = None
+
+    def _read_action_log(self) -> None:
+        """Read the history and the internet-access setting when due.
+
+        Like the schedule list, a request the gateway refuses is not repeated
+        until the integration is reloaded, and a missing answer only delays
+        the next read, so neither fails the snapshot.
+        """
+        now = time.monotonic()
+        if self._session is None or now < self._action_log_retry_after:
+            return
+        if (
+            self._action_log_read is not None
+            and now - self._action_log_read < ACTION_LOG_REFRESH_INTERVAL
+        ):
+            return
+        reads: list[tuple[str, OperationType, OperationType]] = []
+        if not self._action_log_unsupported:
+            reads.append(
+                (
+                    "log",
+                    OperationType.ACTION_LOG_REQUEST,
+                    OperationType.ACTION_LOG_CONFIRM,
+                )
+            )
+        if not self._remote_access_unsupported:
+            reads.append(
+                (
+                    "remote",
+                    OperationType.REMOTE_ACCESS_REQUEST,
+                    OperationType.REMOTE_ACCESS_CONFIRM,
+                )
+            )
+        for name, request, confirm in reads:
+            try:
+                response = self._connected_session().request(
+                    request, confirm, timeout=SCHEDULES_REQUEST_TIMEOUT
+                )
+                if name == "log":
+                    self._action_log = decode_action_log(response.body)
+                else:
+                    self._remote_access = decode_remote_access(response.body)
+            except (GatewayResponseError, ProtobufDecodeError):
+                if name == "log":
+                    self._action_log_unsupported = True
+                    self._action_log = None
+                else:
+                    self._remote_access_unsupported = True
+                    self._remote_access = None
+                self.close()
+                return
+            except (ProtocolError, TransportError):
+                self._action_log_retry_after = now + ACTION_LOG_RETRY_INTERVAL
+                self.close()
+                return
+        self._action_log_read = now
 
     def _read_schedules(self, run_state: RunState) -> Schedules | None:
         """Return the schedule list, read again when it may have changed.

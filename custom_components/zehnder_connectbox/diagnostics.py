@@ -355,6 +355,14 @@ async def async_get_config_entry_diagnostics(
             "run_mode": run_mode,
             "temperature_mode": snapshot.run_state.temperature_mode,
             "standby": snapshot.run_state.standby,
+            "absence_planned": snapshot.run_state.absence_planned,
+            "absence_start": snapshot.run_state.standby_start,
+            "absence_end": snapshot.run_state.standby_end,
+            "week_plan": snapshot.run_state.week_plan,
+            "remote_access": snapshot.remote_access,
+            "history_entries": (
+                len(snapshot.action_log) if snapshot.action_log is not None else None
+            ),
             "summer_ventilation_active": snapshot.run_state.summer_ventilation,
             "summer_ventilation_enabled": (
                 snapshot.summer_ventilation_settings.enabled
@@ -491,17 +499,3 @@ async def async_get_config_entry_diagnostics(
         capture["unsolicited_frames"] = {"error": type(err).__name__}
     result["capture"] = capture
     return result
-
-
-def test_response_structure(
-    entry: ZehnderConnectBoxConfigEntry, body: bytes, *, show_text: bool
-) -> Any:
-    """Temporary test build: show a test request's answer by structure.
-
-    Names and identities of the home stay hidden; other text, such as the
-    name of a schedule, is shown on request.
-    """
-    snapshot = entry.runtime_data.data
-    rooms = snapshot.rooms if snapshot is not None else ()
-    identities = _identity_labels(rooms, getattr(entry, "data", {}))
-    return _frame_structure(body, identities, show_text=show_text)

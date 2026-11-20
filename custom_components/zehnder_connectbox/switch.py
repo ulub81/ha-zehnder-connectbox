@@ -81,6 +81,23 @@ async def async_setup_entry(
     add_boost_switches()
     entry.async_on_unload(coordinator.async_add_listener(add_boost_switches))
 
+    absence_added = False
+
+    @callback
+    def add_absence_switch() -> None:
+        nonlocal absence_added
+        if (
+            absence_added
+            or coordinator.data is None
+            or coordinator.data.run_state.standby_mode is None
+        ):
+            return
+        async_add_entities([ConnectBoxAbsencePlannerSwitch(coordinator)])
+        absence_added = True
+
+    add_absence_switch()
+    entry.async_on_unload(coordinator.async_add_listener(add_absence_switch))
+
     # Temporary capture build: choose the units read for the diagnostics.
     known_capture: set[int] = set()
 
@@ -234,6 +251,59 @@ class ConnectBoxSummerVentilationEnabledSwitch(ConnectBoxGatewayEntity, SwitchEn
     async def async_turn_off(self, **kwargs) -> None:
         """Disable the summer function while preserving its duration."""
         await self.coordinator.async_set_summer_configuration(enabled=False)
+
+
+def _iso(timestamp: int | None) -> str | None:
+    if not timestamp:
+        return None
+    try:
+        return datetime.fromtimestamp(timestamp, UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+class ConnectBoxAbsencePlannerSwitch(ConnectBoxGatewayEntity, SwitchEntity):
+    """The app's absence planner (Abwesenheitsplaner).
+
+    Switched on, the gateway puts the system into frost protection for the
+    period set with the absence start and end; without one, the period starts
+    now and lasts one day, as in the app.
+    """
+
+    _attr_translation_key = "absence_planner"
+    _attr_icon = "mdi:bag-suitcase"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        gateway_uuid = coordinator.entry.data[CONF_GATEWAY_UUID]
+        self._attr_unique_id = f"{gateway_uuid}_absence_planner"
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return whether the planner is saved for a period."""
+        snapshot = self.coordinator.data
+        return snapshot.run_state.absence_planned if snapshot is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Show the period and whether it is running now."""
+        snapshot = self.coordinator.data
+        if snapshot is None:
+            return {}
+        start, end = self.coordinator.absence_period()
+        return {
+            "starts_at": _iso(start),
+            "ends_at": _iso(end),
+            "active": snapshot.run_state.standby,
+        }
+
+    async def async_turn_on(self, **kwargs) -> None:
+        """Save the planner for the chosen period."""
+        await self.coordinator.async_set_absence(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Switch the planner off."""
+        await self.coordinator.async_set_absence(False)
 
 
 class ConnectBoxBoostSwitch(ConnectBoxDeviceEntity, SwitchEntity):
