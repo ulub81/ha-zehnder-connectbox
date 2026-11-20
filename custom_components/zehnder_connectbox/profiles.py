@@ -95,11 +95,11 @@ SUMMER_VENTILATION_ROLE_VALUES = {
     name: value for value, name in SUMMER_VENTILATION_ROLES.items()
 }
 
-# Temporary test build: boost of a room. The app offers a duration of 15 to
-# 120 minutes per room in steps of 15 and starts and stops the boost on its
-# ventilation page. Only the room fields that show the result are known
-# (protocol.ROOM_BOOST_UNTIL and ROOM_BOOST_DURATION), so the writes are
-# candidates whose outcome is listed in the diagnostics capture.
+# Boost of a room. The app offers a duration of 15 to 120 minutes per room in
+# steps of 15 and starts and stops the boost on its ventilation page. A
+# duration written as room field 22 showed in the app; starting and stopping
+# uses the app's room-value update (protocol.ROOM_VALUE_BOOST_UNTIL). The
+# writes are logged in the diagnostics capture until confirmed on more units.
 BOOST_DURATION_MINIMUM = 15
 BOOST_DURATION_MAXIMUM = 120
 BOOST_DURATION_STEP = 15
@@ -235,7 +235,7 @@ def summer_ventilation_role_key(device: AttachedDevice) -> PropertyKey | None:
 
 
 def supports_boost_candidates(room: Room, device: AttachedDevice) -> bool:
-    """Temporary test build: limit the boost writes to checked rooms.
+    """Limit the boost writes to rooms like the one they were checked on.
 
     The room must report its boost duration, and the unit must be a
     ComfoSpot 50, the profile on which the boost fields were observed.

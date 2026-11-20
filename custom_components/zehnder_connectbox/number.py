@@ -46,7 +46,7 @@ async def async_setup_entry(
     add_duration_when_supported()
     entry.async_on_unload(coordinator.async_add_listener(add_duration_when_supported))
 
-    # Temporary test build: boost duration of each unit's room.
+    # Boost duration of each unit's room.
     known_boost: set[int] = set()
 
     @callback
@@ -118,7 +118,7 @@ class ConnectBoxSummerVentilationDuration(ConnectBoxGatewayEntity, NumberEntity)
 
 
 class ConnectBoxBoostDuration(ConnectBoxDeviceEntity, NumberEntity):
-    """Temporary test build: duration of a boost in the unit's room.
+    """Duration of a boost in the unit's room, as set in the app.
 
     The app offers 15 to 120 minutes per room. The value is written with a
     room write whose outcome is listed in the diagnostics capture.

@@ -44,6 +44,12 @@ ROOM_BOOST_DURATION = 22
 """Configured boost duration in minutes (the app offers 15 to 120)."""
 ROOM_TEMPORARY_UNTIL = 61
 """Unix time of the next schedule change that ends a temporary change."""
+# Room-value update (SET_ROOM_VALUE) field with which the official app starts
+# and stops a boost. The gateway forwarded the app's update to this client as
+# an unsolicited room-value notification: the room ID and field 15 set to the
+# end of the boost as Unix time when the app started a 15-minute boost, and to
+# 0 when the app ended it early. The room then reported field 18 accordingly.
+ROOM_VALUE_BOOST_UNTIL = 15
 
 
 class ProtocolError(ConnectionError):
@@ -358,6 +364,16 @@ def _decode_property(message: bytes) -> PropertyValue:
             property_id=_required_uint(key_fields, 6, "property ID"),
         ),
         value=bytes_value(fields, 2),
+    )
+
+
+def encode_room_boost(room_id: int, until: int) -> bytes:
+    """Build the room-value update that starts (end time) or stops (0) a boost."""
+    for value in (room_id, until):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("room ID and boost end must be non-negative integers")
+    return encode_bytes(
+        1, encode_uint(1, room_id) + encode_uint(ROOM_VALUE_BOOST_UNTIL, until)
     )
 
 

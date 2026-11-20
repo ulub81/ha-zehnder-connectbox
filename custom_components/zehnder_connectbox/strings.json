@@ -328,6 +328,9 @@
       },
       "summer_ventilation_enabled": {
         "name": "Enable summer ventilation"
+      },
+      "boost": {
+        "name": "Boost"
       }
     },
     "number": {
@@ -335,7 +338,7 @@
         "name": "Summer ventilation duration"
       },
       "boost_duration": {
-        "name": "Boost duration (test)"
+        "name": "Boost duration"
       }
     }
   },
@@ -420,6 +423,12 @@
     },
     "boost_unsupported": {
       "message": "The boost is not available for this room."
+    },
+    "boost_mode_unavailable": {
+      "message": "A boost can only be started in automatic or manual mode."
+    },
+    "boost_duration_unavailable": {
+      "message": "The room does not report a valid boost duration."
     },
     "command_rejected": {
       "message": "The ConnectBox rejected the command. Check its operating state and settings in the app."

@@ -328,6 +328,9 @@
       },
       "summer_ventilation_enabled": {
         "name": "Sommerlüftung freigeben"
+      },
+      "boost": {
+        "name": "Stoßlüftung"
       }
     },
     "number": {
@@ -335,7 +338,7 @@
         "name": "Sommerlüftungsdauer"
       },
       "boost_duration": {
-        "name": "Stoßlüftungsdauer (Test)"
+        "name": "Stoßlüftungsdauer"
       }
     }
   },
@@ -420,6 +423,12 @@
     },
     "boost_unsupported": {
       "message": "Die Stoßlüftung ist für diesen Raum nicht verfügbar."
+    },
+    "boost_mode_unavailable": {
+      "message": "Eine Stoßlüftung kann nur im automatischen oder manuellen Betrieb gestartet werden."
+    },
+    "boost_duration_unavailable": {
+      "message": "Der Raum meldet keine gültige Stoßlüftungsdauer."
     },
     "command_rejected": {
       "message": "Die ConnectBox hat den Befehl abgelehnt. Prüfe den Betriebszustand und die Einstellungen in der App."

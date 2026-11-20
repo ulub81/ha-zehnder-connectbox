@@ -58,6 +58,7 @@ from .protocol import (
     encode_pairing,
     encode_property_request,
     encode_property_update,
+    encode_room_boost,
     encode_room_level,
     encode_room_number_update,
     encode_run_state,
@@ -73,6 +74,9 @@ LEVEL_SETTLE_POLL_INTERVAL = 0.5
 SUMMER_SETTLE_TIMEOUT = 8.0
 SUMMER_SETTLE_POLL_INTERVAL = 0.5
 COMMAND_SETTLE_TIMEOUT = 10.0
+# A started boost may end this many seconds later than the room's duration
+# allows (clock differences) before it is stopped again as unexpected.
+BOOST_END_TOLERANCE = 300
 # The app's manual mode offers the situations at home and away. The run-state
 # update carries them as the user location next to the run mode.
 SITUATION_LOCATIONS = {
@@ -83,6 +87,10 @@ SITUATION_LOCATIONS = {
 CAPTURE_REQUEST_TIMEOUT = 3.0
 CAPTURE_SETTLE_TIMEOUT = 15.0
 CAPTURE_POLL_INTERVAL = 0.5
+# Pause after a failed read sequence before the next one reconnects, and the
+# number of failures in a row after which the remaining groups are skipped.
+CAPTURE_RETRY_PAUSE = 1.0
+CAPTURE_FAILURE_LIMIT = 3
 type CaptureGroups = tuple[tuple[tuple[int, int, int], ...], ...]
 
 
@@ -107,6 +115,14 @@ class UnsolicitedFrames:
     last: deque[tuple[float, int | None, int | None, bytes]] = field(
         default_factory=lambda: deque(maxlen=UNSOLICITED_SAMPLES)
     )
+
+
+class CaptureError(ProtocolError):
+    """Temporary capture build: the final read failed; carries group errors."""
+
+    def __init__(self, message: str, errors: dict[int, list[str]]) -> None:
+        super().__init__(message)
+        self.errors = errors
 
 
 class PairingError(ConnectionError):
@@ -639,12 +655,11 @@ class ConnectBoxClient:
             raise
 
     def set_boost_duration(self, room_id: int, minutes: int) -> GatewaySnapshot:
-        """Temporary test build: write a room's boost duration and read it back.
+        """Write a room's boost duration and read it back.
 
         The room is written back as read with only its boost duration
-        (field 22) changed. The app offers 15 to 120 minutes in steps of 15
-        on the room's settings page. Starting a boost is not attempted: a room
-        write with the end of the boost (field 18) did not start one.
+        (field 22) changed; the app showed the written value on the room's
+        settings page. The app offers 15 to 120 minutes in steps of 15.
         """
         if (
             isinstance(minutes, bool)
@@ -668,6 +683,62 @@ class ConnectBoxClient:
             )
             if written is None or written.boost_duration != minutes:
                 raise ProtocolError("gateway did not report the written boost duration")
+            return self.read_snapshot(refresh_properties=False)
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    def set_boost(self, room_id: int, active: bool) -> GatewaySnapshot:
+        """Start a boost for the room's duration or stop it, as the app does.
+
+        The app sends a room-value update with field 15 set to the end of the
+        boost as Unix time, or to 0 to end it early. The write is confirmed by
+        the end the room reports afterwards (room field 18). A reported end
+        later than the duration allows is stopped again and reported.
+        """
+        try:
+            run_state = self._read_run_state()
+            room = self._boost_room(room_id)
+            now = time.time()
+            if room.boost_active(now) is active:
+                return self.read_snapshot(refresh_properties=False)
+            if active:
+                if run_state.run_mode not in (RunMode.AUTOMATIC, RunMode.MANUAL):
+                    raise CommandValidationError("boost_mode_unavailable")
+                duration = room.boost_duration
+                if (
+                    duration is None
+                    or not BOOST_DURATION_MINIMUM <= duration <= BOOST_DURATION_MAXIMUM
+                ):
+                    raise CommandValidationError("boost_duration_unavailable")
+                until = int(now) + duration * 60
+            else:
+                until = 0
+
+            session = self._connected_session()
+            session.request(
+                OperationType.SET_ROOM_VALUE_REQUEST,
+                OperationType.SET_ROOM_VALUE_CONFIRM,
+                encode_room_boost(room_id, until),
+            )
+            written = self._wait_for(
+                lambda: self._find_room(room_id),
+                lambda item: item is None or item.boost_active(time.time()) is active,
+            )
+            if written is None or written.boost_active(time.time()) is not active:
+                raise ProtocolError(
+                    "gateway did not start the boost"
+                    if active
+                    else "gateway did not stop the boost"
+                )
+            if active and (written.boost_until or 0) > until + BOOST_END_TOLERANCE:
+                # Do not leave a boost running longer than the room allows.
+                session.request(
+                    OperationType.SET_ROOM_VALUE_REQUEST,
+                    OperationType.SET_ROOM_VALUE_CONFIRM,
+                    encode_room_boost(room_id, 0),
+                )
+                raise ProtocolError("gateway reported an unexpected boost end")
             return self.read_snapshot(refresh_properties=False)
         except (ProtocolError, TransportError):
             self.close()
@@ -708,6 +779,7 @@ class ConnectBoxClient:
             for device_id, _product_type, groups in targets
         }
         errors: dict[int, list[str]] = {device_id: [] for device_id in wanted}
+        failures_in_row = 0
 
         def label(key: tuple[int, int, int]) -> str:
             return ".".join(str(part) for part in key)
@@ -717,6 +789,11 @@ class ConnectBoxClient:
                 group_label = ",".join(label(key) for key in group)
                 if time.monotonic() >= deadline:
                     errors[device_id].append(f"{group_label}: skipped, time budget")
+                    continue
+                if failures_in_row >= CAPTURE_FAILURE_LIMIT:
+                    errors[device_id].append(
+                        f"{group_label}: skipped after {failures_in_row} failures"
+                    )
                     continue
                 last = len(group) - 1
                 try:
@@ -743,34 +820,48 @@ class ConnectBoxClient:
                         f"{group_label}: {type(err).__name__}: {err}"
                     )
                     self.close()
+                    failures_in_row += 1
+                    # A new connection right away may be refused.
+                    time.sleep(CAPTURE_RETRY_PAUSE)
+                else:
+                    failures_in_row = 0
 
         found: dict[int, dict[tuple[int, int, int], bytes]] = {
             device_id: {} for device_id in wanted
         }
         settle_deadline = min(deadline, time.monotonic() + CAPTURE_SETTLE_TIMEOUT)
-        try:
-            while True:
-                rooms = self._read_rooms()
-                for room in rooms:
-                    for device in room.devices:
-                        keys = wanted.get(device.device_id)
-                        if keys is None:
-                            continue
-                        for value in device.properties:
-                            identity = value.key.value_identity
-                            if identity in keys and value.value:
-                                found[device.device_id][identity] = value.value
-                complete = all(
-                    len(found[device_id]) == len(keys)
-                    for device_id, keys in wanted.items()
-                )
-                if complete or time.monotonic() >= settle_deadline:
-                    break
-                time.sleep(CAPTURE_POLL_INTERVAL)
-            run_state = self._read_run_state()
-        except (ProtocolError, TransportError):
-            self.close()
-            raise
+        last_error: Exception | None = None
+        for _attempt in range(2):
+            try:
+                while True:
+                    rooms = self._read_rooms()
+                    for room in rooms:
+                        for device in room.devices:
+                            keys = wanted.get(device.device_id)
+                            if keys is None:
+                                continue
+                            for value in device.properties:
+                                identity = value.key.value_identity
+                                if identity in keys and value.value:
+                                    found[device.device_id][identity] = value.value
+                    complete = all(
+                        len(found[device_id]) == len(keys)
+                        for device_id, keys in wanted.items()
+                    )
+                    if complete or time.monotonic() >= settle_deadline:
+                        break
+                    time.sleep(CAPTURE_POLL_INTERVAL)
+                run_state = self._read_run_state()
+            except (ProtocolError, TransportError) as err:
+                self.close()
+                last_error = err
+                time.sleep(CAPTURE_RETRY_PAUSE)
+            else:
+                break
+        else:
+            raise CaptureError(
+                f"{type(last_error).__name__}: {last_error}", errors
+            ) from last_error
 
         return (
             run_state,

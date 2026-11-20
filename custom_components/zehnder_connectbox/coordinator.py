@@ -225,6 +225,22 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
             partial(self.client.set_boost_duration, room_id, minutes),
         )
 
+    async def async_set_boost(self, room_id: int, active: bool) -> None:
+        """Start or stop a room's boost and log the outcome for the capture."""
+        data = self.data
+        room = (
+            next((item for item in data.rooms if item.room_id == room_id), None)
+            if data is not None
+            else None
+        )
+        duration = room.boost_duration if room is not None else None
+        await self._async_boost_candidate(
+            room_id,
+            "boost_start" if active else "boost_stop",
+            (duration or 0) if active else 0,
+            partial(self.client.set_boost, room_id, active),
+        )
+
     async def _async_boost_candidate(
         self,
         room_id: int,

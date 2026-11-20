@@ -430,7 +430,12 @@ async def async_get_config_entry_diagnostics(
         run_state, rooms, properties = await coordinator.async_capture()
     except Exception as err:  # noqa: BLE001 - diagnostics must still be returned
         capture["source"] = "last poll"
-        capture["error"] = type(err).__name__
+        capture["error"] = f"{type(err).__name__}: {err}"
+        group_errors = getattr(err, "errors", None)
+        if isinstance(group_errors, dict):
+            capture["group_errors"] = {
+                str(device_id): items for device_id, items in group_errors.items()
+            }
     else:
         run_state_raw = run_state.raw
         capture["source"] = "fresh read"
@@ -442,7 +447,7 @@ async def async_get_config_entry_diagnostics(
         capture["fields"] = _raw_state(run_state_raw, rooms, identities)
     except ProtobufDecodeError:
         capture["fields"] = {"status": "failed", "error": "ProtobufDecodeError"}
-    # Temporary test build: outcome of the boost-duration candidate writes and
+    # Temporary test build: outcome of the boost writes and
     # the frames the gateway sent without a matching request.
     capture["candidate_writes"] = list(getattr(coordinator, "candidate_writes", []))
     try:

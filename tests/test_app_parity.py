@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import UUID
@@ -13,8 +14,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
 from custom_components.zehnder_connectbox import client as client_mod
-from custom_components.zehnder_connectbox import diagnostics, number, select
-from custom_components.zehnder_connectbox.client import ConnectBoxClient
+from custom_components.zehnder_connectbox import diagnostics, number, select, switch
+from custom_components.zehnder_connectbox.client import CaptureError, ConnectBoxClient
 from custom_components.zehnder_connectbox.coordinator import (
     ZehnderConnectBoxCoordinator,
 )
@@ -40,6 +41,7 @@ from custom_components.zehnder_connectbox.protocol import (
     OperationType,
     ProtocolError,
     decode_rooms,
+    encode_room_boost,
     encode_room_number_update,
 )
 from custom_components.zehnder_connectbox.session import (
@@ -90,8 +92,8 @@ def rooms_message(*, role=1, boost_duration=15, boost_until=None):
     return encode_bytes(1, b"".join(room))
 
 
-def run_state(*, summer=False):
-    return RunState(1, 0, False, 0, summer, None, ())
+def run_state(*, summer=False, run_mode=1):
+    return RunState(run_mode, 0, False, 0, summer, None, ())
 
 
 def snapshot(message, **state):
@@ -109,10 +111,13 @@ def written_room(body):
 class FakeGateway:
     """Answer the client's reads from mutable state and record its requests."""
 
-    def __init__(self, *, apply=True, summer=False, **room):
+    def __init__(self, *, apply=True, summer=False, run_mode=1, boost_shift=0, **room):
         self.room = room
         self.apply = apply
         self.summer = summer
+        self.run_mode = run_mode
+        # Seconds the gateway adds to a requested boost end.
+        self.boost_shift = boost_shift
         self.requests = []
 
     @property
@@ -128,6 +133,9 @@ class FakeGateway:
         if request is OperationType.SET_DEVICE_PROPERTIES_REQUEST:
             record = decode_fields(bytes_value(decode_fields(body), 3))
             self.room["role"] = bytes_value(record, 2)[0]
+        if request is OperationType.SET_ROOM_VALUE_REQUEST:
+            until = uint_value(written_room(body), 15)
+            self.room["boost_until"] = until + self.boost_shift if until else None
         return SimpleNamespace(body=b"")
 
 
@@ -135,7 +143,9 @@ def make_client(gateway):
     client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
     client._connected_session = lambda: gateway
     client._read_rooms = lambda: decode_rooms(gateway.message)
-    client._read_run_state = lambda: run_state(summer=gateway.summer)
+    client._read_run_state = lambda: run_state(
+        summer=gateway.summer, run_mode=gateway.run_mode
+    )
     client.read_snapshot = lambda **_kwargs: "snapshot"
     return client
 
@@ -235,6 +245,88 @@ class BoostDurationClientTests(FastSettle):
         client.close.assert_called_once_with()
 
 
+class BoostClientTests(FastSettle):
+    def boost_writes(self, gateway):
+        return [
+            (uint_value(written_room(body), 1), uint_value(written_room(body), 15))
+            for request, body in gateway.requests
+            if request is OperationType.SET_ROOM_VALUE_REQUEST
+        ]
+
+    def test_room_value_update_carries_only_room_and_boost_end(self):
+        fields = written_room(encode_room_boost(3, 1_800_000_900))
+        self.assertEqual([field.number for field in fields], [1, 15])
+        self.assertEqual(
+            (uint_value(fields, 1), uint_value(fields, 15)), (3, 1_800_000_900)
+        )
+        for room_id, until in ((-1, 0), (3, -1), (True, 0), (3, 1.5)):
+            with self.subTest(room_id=room_id, until=until):
+                with self.assertRaises(ValueError):
+                    encode_room_boost(room_id, until)
+
+    def test_starts_a_boost_for_the_room_duration(self):
+        gateway = FakeGateway(boost_duration=30)
+        before = int(time.time())
+        self.assertEqual(make_client(gateway).set_boost(3, True), "snapshot")
+        ((room_id, until),) = self.boost_writes(gateway)
+        self.assertEqual(room_id, 3)
+        self.assertGreaterEqual(until, before + 30 * 60)
+        self.assertLessEqual(until, int(time.time()) + 30 * 60)
+        self.assertEqual(
+            [request for request, _body in gateway.requests],
+            [OperationType.SET_ROOM_VALUE_REQUEST],
+        )
+
+    def test_stops_a_running_boost(self):
+        gateway = FakeGateway(boost_until=int(time.time()) + 600)
+        self.assertEqual(make_client(gateway).set_boost(3, False), "snapshot")
+        self.assertEqual(self.boost_writes(gateway), [(3, 0)])
+        self.assertIsNone(gateway.room["boost_until"])
+
+    def test_does_not_write_when_the_room_is_already_in_that_state(self):
+        for gateway, active in (
+            (FakeGateway(boost_until=int(time.time()) + 600), True),
+            (FakeGateway(), False),
+        ):
+            with self.subTest(active=active):
+                self.assertEqual(make_client(gateway).set_boost(3, active), "snapshot")
+                self.assertEqual(gateway.requests, [])
+
+    def test_refuses_other_modes_and_rooms_without_boost(self):
+        cases = (
+            (FakeGateway(run_mode=4), 3, "boost_mode_unavailable"),
+            (FakeGateway(run_mode=3), 3, "boost_mode_unavailable"),
+            (FakeGateway(boost_duration=None), 3, "boost_unsupported"),
+            (FakeGateway(boost_duration=10), 3, "boost_duration_unavailable"),
+            (FakeGateway(), 9, "room_unavailable"),
+        )
+        for gateway, room_id, key in cases:
+            with self.subTest(key=key, run_mode=gateway.run_mode):
+                with self.assertRaises(CommandValidationError) as raised:
+                    make_client(gateway).set_boost(room_id, True)
+                self.assertEqual(raised.exception.translation_key, key)
+                self.assertEqual(gateway.requests, [])
+
+    def test_reports_a_boost_the_gateway_did_not_start(self):
+        gateway = FakeGateway(apply=False)
+        client = make_client(gateway)
+        client.close = Mock()
+        with self.assertRaisesRegex(ProtocolError, "did not start"):
+            client.set_boost(3, True)
+        client.close.assert_called_once_with()
+
+    def test_stops_a_boost_that_would_run_longer_than_its_duration(self):
+        gateway = FakeGateway(boost_shift=3600)
+        client = make_client(gateway)
+        client.close = Mock()
+        with self.assertRaisesRegex(ProtocolError, "unexpected boost end"):
+            client.set_boost(3, True)
+        writes = self.boost_writes(gateway)
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(writes[1], (3, 0))
+        self.assertIsNone(gateway.room["boost_until"])
+
+
 class SummerRoleClientTests(FastSettle):
     def test_writes_the_property_and_requests_it_again(self):
         gateway = FakeGateway(role=1)
@@ -329,6 +421,9 @@ class FakeCoordinator:
     async def async_set_boost_duration(self, room_id, minutes):
         self.calls.append(("boost_duration", room_id, minutes))
 
+    async def async_set_boost(self, room_id, active):
+        self.calls.append(("boost", room_id, active))
+
 
 def set_up(module, coordinator):
     added = []
@@ -387,6 +482,38 @@ class EntityTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ServiceValidationError):
                 asyncio.run(entity.async_set_native_value(value))
         self.assertEqual(len(coordinator.calls), 1)
+
+    def boost_switches(self, coordinator):
+        return [
+            entity
+            for entity in set_up(switch, coordinator)
+            if isinstance(entity, switch.ConnectBoxBoostSwitch)
+        ]
+
+    def test_boost_switch_follows_the_room_and_writes(self):
+        end = int(time.time()) + 600
+        coordinator = FakeCoordinator(snapshot(rooms_message(boost_until=end)))
+        (entity,) = self.boost_switches(coordinator)
+        self.assertTrue(entity.is_on)
+        self.assertTrue(entity.available)
+        self.assertEqual(entity.extra_state_attributes["duration_minutes"], 15)
+        self.assertEqual(
+            datetime.fromisoformat(
+                entity.extra_state_attributes["ends_at"]
+            ).timestamp(),
+            end,
+        )
+        asyncio.run(entity.async_turn_off())
+        asyncio.run(entity.async_turn_on())
+        self.assertEqual(coordinator.calls, [("boost", 3, False), ("boost", 3, True)])
+        expired = FakeCoordinator(snapshot(rooms_message(boost_until=100)))
+        (idle,) = self.boost_switches(expired)
+        self.assertFalse(idle.is_on)
+        self.assertIsNone(idle.extra_state_attributes["ends_at"])
+
+    def test_boost_switch_needs_a_reported_duration(self):
+        coordinator = FakeCoordinator(snapshot(rooms_message(boost_duration=None)))
+        self.assertEqual(self.boost_switches(coordinator), [])
 
     def test_boost_duration_needs_a_reported_duration(self):
         coordinator = FakeCoordinator(snapshot(rooms_message(boost_duration=None)))
@@ -475,6 +602,19 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             log[2]["result"],
             "ProtocolError: gateway did not report the written value",
         )
+
+    async def test_boost_start_and_stop_are_logged_with_the_duration(self):
+        result = snapshot(rooms_message(boost_until=int(time.time()) + 900))
+        self.client.set_boost = Mock(return_value=result)
+        await self.coordinator.async_set_boost(3, True)
+        self.client.set_boost.assert_called_once_with(3, True)
+        await self.coordinator.async_set_boost(3, False)
+        log = self.coordinator.candidate_writes
+        self.assertEqual(
+            [(item["write"], item["value"], item["result"]) for item in log],
+            [("boost_start", 15, "confirmed"), ("boost_stop", 0, "confirmed")],
+        )
+        self.assertGreater(log[0]["read_back"]["boost_ends_in_seconds"], 800)
 
     async def test_unsolicited_frames_are_copied_for_the_diagnostics(self):
         self.client._record_unsolicited(Operation(type=207), b"\x08\x01")
@@ -602,6 +742,77 @@ class UnsolicitedFrameTests(unittest.TestCase):
                 "body": None,
             },
         )
+
+
+class CaptureRobustnessTests(unittest.TestCase):
+    def setUp(self):
+        for name, value in (
+            ("CAPTURE_RETRY_PAUSE", 0),
+            ("CAPTURE_POLL_INTERVAL", 0),
+            ("CAPTURE_SETTLE_TIMEOUT", 0),
+        ):
+            patcher = patch.object(client_mod, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
+        self.client.close = Mock()
+        self.groups = (((38, 0, 9),), ((38, 0, 13),), ((36, 0, 3),), ((36, 1, 3),))
+
+    def test_skips_the_remaining_groups_after_repeated_failures(self):
+        attempts = []
+
+        def refuse():
+            attempts.append(True)
+            raise client_mod.TransportError("unable to establish a connection")
+
+        self.client._connected_session = refuse
+        self.client._read_rooms = lambda: decode_rooms(rooms_message())
+        self.client._read_run_state = lambda: run_state()
+        _state, _rooms, result = self.client.capture(
+            ((7, 30, self.groups),), deadline=time.monotonic() + 30
+        )
+        self.assertEqual(len(attempts), client_mod.CAPTURE_FAILURE_LIMIT)
+        self.assertTrue(result[7]["errors"][-1].endswith("skipped after 3 failures"))
+        self.assertIn("TransportError", result[7]["errors"][0])
+
+    def test_final_read_is_retried_and_failure_keeps_the_group_errors(self):
+        session = SimpleNamespace(
+            request=Mock(side_effect=GatewayResponseError(2, "refused"))
+        )
+        self.client._connected_session = lambda: session
+        reads = []
+
+        def failing_read():
+            reads.append(True)
+            raise client_mod.TransportError("gateway read failed")
+
+        self.client._read_rooms = failing_read
+        with self.assertRaises(CaptureError) as raised:
+            self.client.capture(((7, 30, self.groups[:1]),), deadline=time.monotonic() + 30)
+        self.assertEqual(len(reads), 2)
+        self.assertIn("TransportError: gateway read failed", str(raised.exception))
+        self.assertIn("refused", raised.exception.errors[7][0])
+
+    def test_diagnostics_show_the_capture_error_and_group_errors(self):
+        async def failing_capture():
+            raise CaptureError("TransportError: gateway read failed", {7: ["38.0.9: x"]})
+
+        async def frames():
+            return {}
+
+        coordinator = FakeCoordinator(snapshot(rooms_message()))
+        coordinator.async_capture = failing_capture
+        coordinator.async_unsolicited_frames = frames
+        entry = SimpleNamespace(
+            runtime_data=coordinator, version=1, data={"gateway_uuid": str(GATEWAY)}
+        )
+        result = asyncio.run(diagnostics.async_get_config_entry_diagnostics(None, entry))
+        capture = result["capture"]
+        self.assertEqual(capture["source"], "last poll")
+        self.assertEqual(
+            capture["error"], "CaptureError: TransportError: gateway read failed"
+        )
+        self.assertEqual(capture["group_errors"], {"7": ["38.0.9: x"]})
 
 
 if __name__ == "__main__":
