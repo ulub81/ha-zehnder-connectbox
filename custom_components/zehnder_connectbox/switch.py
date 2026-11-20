@@ -13,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import ZehnderConnectBoxConfigEntry
 from .const import CONF_GATEWAY_UUID
 from .entity import ConnectBoxDeviceEntity, ConnectBoxGatewayEntity
-from .models import GatewaySnapshot, RunMode
+from .models import GatewaySnapshot, RunMode, TemperatureMode
 from .profiles import (
     supports_boost_candidates,
     supports_sensor_status,
@@ -36,7 +36,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up standby and any reported summer ventilation control."""
     coordinator = entry.runtime_data
-    async_add_entities([ConnectBoxVentilationSwitch(coordinator)])
+    async_add_entities(
+        [ConnectBoxVentilationSwitch(coordinator), ConnectBoxPresenceSwitch(coordinator)]
+    )
     summer_added = False
 
     @callback
@@ -163,6 +165,68 @@ class ConnectBoxVentilationSwitch(ConnectBoxGatewayEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs) -> None:
         """Put all attached ventilation units into standby."""
         await self.coordinator.async_set_power(False)
+
+
+# Run-state field 3 from the app's enumeration.
+SITUATION_SOURCES = {
+    1: "schedule",
+    2: "user",
+    3: "no_schedule",
+    4: "presence_home",
+}
+
+
+class ConnectBoxPresenceSwitch(ConnectBoxGatewayEntity, SwitchEntity):
+    """At home or away while the schedule runs, like the house on the app's
+    start screen.
+
+    On is at home: the schedule's situations apply. Off is away until the
+    switch is turned on again or the schedule switches; the operating mode
+    stays automatic, unlike selecting a situation, which switches to manual.
+    """
+
+    _attr_translation_key = "presence"
+    _attr_icon = "mdi:home-account"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        gateway_uuid = coordinator.entry.data[CONF_GATEWAY_UUID]
+        self._attr_unique_id = f"{gateway_uuid}_presence"
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return whether the system is at home."""
+        snapshot = self.coordinator.data
+        if snapshot is None:
+            return None
+        return snapshot.run_state.temperature_mode != TemperatureMode.AWAY
+
+    @property
+    def available(self) -> bool:
+        """Only offer the switch while the schedule runs, as in the app."""
+        snapshot = self.coordinator.data
+        return bool(
+            super().available
+            and snapshot is not None
+            and snapshot.run_state.run_mode == RunMode.AUTOMATIC
+            and snapshot.run_state.temperature_mode
+            in (TemperatureMode.AWAKE, TemperatureMode.ASLEEP, TemperatureMode.AWAY)
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | int | None]:
+        """Show why the current situation applies."""
+        snapshot = self.coordinator.data
+        source = snapshot.run_state.situation_source if snapshot else None
+        return {"source": SITUATION_SOURCES.get(source, source) if source else None}
+
+    async def async_turn_on(self, **kwargs) -> None:
+        """Return to at home."""
+        await self.coordinator.async_set_presence(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Switch to away while the schedule keeps running."""
+        await self.coordinator.async_set_presence(False)
 
 
 class ConnectBoxSummerVentilationSwitch(ConnectBoxGatewayEntity, SwitchEntity):

@@ -216,6 +216,13 @@ class RunState:
     """
     standby_end: int | None = None
     """End of the absence planner's period as Unix time (field 10)."""
+    situation_source: int | None = None
+    """Why the situation applies (field 3), from the app's enumeration.
+
+    1 according to the schedule, 2 changed by the user, 3 no schedule runs,
+    4 presence switched to at home. Tapping the house on the app's start
+    screen in schedule operation changed it from 1 to 2 and back.
+    """
 
     @property
     def absence_planned(self) -> bool | None:

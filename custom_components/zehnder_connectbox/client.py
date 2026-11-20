@@ -16,6 +16,7 @@ from .const import (
     VENTILATION_LEVELS,
 )
 from .errors import CommandValidationError
+from .firmware import FirmwarePackage
 from .models import (
     ActionLogEntry,
     AttachedDevice,
@@ -59,10 +60,12 @@ from .profiles import (
 from .protobuf import ProtobufDecodeError
 from .protocol import (
     ROOM_BOOST_DURATION,
+    UPGRADE_BLOCK_SIZE,
     Operation,
     OperationType,
     PropertySequenceCommand,
     ProtocolError,
+    UpgradeCommand,
     decode_action_log,
     decode_day_plan_confirm,
     decode_local_time_offset,
@@ -93,6 +96,7 @@ from .protocol import (
     encode_site_info,
     encode_standby_time_range,
     encode_summer_ventilation_settings,
+    encode_upgrade,
     encode_week_plan,
 )
 from .session import ConnectBoxSession, GatewayResponseError
@@ -134,6 +138,12 @@ GATEWAY_READS: tuple[tuple[str, OperationType, OperationType], ...] = (
         OperationType.UPDATE_PROGRESS_CONFIRM,
     ),
 )
+# The app waits at least a minute for the answer to each firmware block.
+UPGRADE_REQUEST_TIMEOUT = 60.0
+# Run-state field 3 of the app's enumeration: the situation was changed by
+# a user, or presence was switched to at home, while the schedule runs.
+PRESENCE_LOCATION_HOME = 1
+PRESENCE_LOCATION_AWAY = 2
 # Gateway results of the app's enumeration (LOCKED, NOT_EXIST).
 RESULT_NOT_EXIST = 7
 RESULT_LOCKED = 9
@@ -1136,6 +1146,103 @@ class ConnectBoxClient:
         self._schedules_read = time.monotonic()
         self._schedules_unsupported = False
         return self._schedules
+
+    def set_presence(self, home: bool) -> GatewaySnapshot:
+        """Switch between at home and away while the schedule keeps running.
+
+        Tapping the house on the app's start screen in schedule operation
+        changed the situation to away and back; the run state reported the
+        change as made by the user (field 3 = 2) and the mode stayed
+        automatic. The same update as the app's mode change is sent with the
+        automatic mode and the location.
+        """
+        try:
+            before = self._read_run_state()
+            if before.run_mode != RunMode.AUTOMATIC:
+                raise CommandValidationError("presence_needs_schedule")
+            self._connected_session().request(
+                OperationType.SET_RUN_STATE_REQUEST,
+                OperationType.SET_RUN_STATE_CONFIRM,
+                encode_run_state(
+                    int(RunMode.AUTOMATIC),
+                    PRESENCE_LOCATION_HOME if home else PRESENCE_LOCATION_AWAY,
+                ),
+            )
+
+            def applied(state: RunState) -> bool:
+                away = state.temperature_mode == TemperatureMode.AWAY
+                return state.run_mode == RunMode.AUTOMATIC and away is not home
+
+            run_state = self._wait_for(self._read_run_state, applied)
+            if not applied(run_state):
+                raise ProtocolError("gateway did not report the presence")
+            return self.read_snapshot(refresh_properties=False)
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+
+    def upload_firmware(
+        self, package: FirmwarePackage, progress: Callable[[int, int], None]
+    ) -> None:
+        """Send a firmware package to the ConnectBox as the official app does.
+
+        The package is sent in blocks of 256 bytes, each answered by the
+        gateway before the next one: the first block with the start command,
+        the others with continue, and then a finish request without a block.
+        The gateway checks and installs the package after the finish request
+        and restarts; it then updates the units, as the app's update page
+        shows. A failed upload is aborted, so the installed firmware stays.
+        """
+        data = package.data
+        blocks = -(-len(data) // UPGRADE_BLOCK_SIZE)
+        session = self._connected_session()
+        started = False
+        try:
+            for block in range(blocks):
+                chunk = data[block * UPGRADE_BLOCK_SIZE : (block + 1) * UPGRADE_BLOCK_SIZE]
+                command = UpgradeCommand.START if block == 0 else UpgradeCommand.CONTINUE
+                try:
+                    session.request(
+                        OperationType.UPGRADE_REQUEST,
+                        OperationType.UPGRADE_CONFIRM,
+                        encode_upgrade(command, chunk),
+                        timeout=UPGRADE_REQUEST_TIMEOUT,
+                    )
+                except GatewayResponseError as err:
+                    if block == 0 and err.result == RESULT_LOCKED:
+                        raise CommandValidationError("firmware_update_locked") from err
+                    raise
+                started = True
+                progress(block + 1, blocks)
+            session.request(
+                OperationType.UPGRADE_REQUEST,
+                OperationType.UPGRADE_CONFIRM,
+                encode_upgrade(UpgradeCommand.FINISH),
+                timeout=UPGRADE_REQUEST_TIMEOUT,
+            )
+        except (ProtocolError, TransportError, CommandValidationError):
+            if started:
+                self._abort_upload()
+            self.close()
+            raise
+        # The gateway restarts with the new firmware; read its version again.
+        self._version = None
+        self.close()
+
+    def _abort_upload(self) -> None:
+        """Ask the gateway to drop a partly sent package, if it still answers."""
+        session = self._session
+        if session is None:
+            return
+        try:
+            session.request(
+                OperationType.UPGRADE_REQUEST,
+                OperationType.UPGRADE_CONFIRM,
+                encode_upgrade(UpgradeCommand.ABORT),
+                timeout=SCHEDULES_REQUEST_TIMEOUT,
+            )
+        except (ProtocolError, TransportError):
+            pass
 
     def set_site_info(
         self, *, name: str | None = None, language: int | None = None

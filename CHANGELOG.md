@@ -27,6 +27,10 @@ project follows [Semantic Versioning](https://semver.org/).
 - Show the paired apps (Benutzer), the country and network connection, the
   system version and the firmware update state of the units, and register
   the ConnectBox's serial number.
+- Install a newer firmware package of the official app with a firmware update
+  entity; the package is copied into the folder `zehnder_connectbox`.
+- Switch between at home and away while the schedule keeps running, like the
+  house on the app's start screen.
 
 ### Changed
 

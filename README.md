@@ -118,6 +118,7 @@ ConnectBox reports the matching data.
 | --- | --- | --- |
 | Weekly schedule / Daily schedule | Sensor | Active weekly schedule with all stored schedules, and today's daily schedule with its switching times and timed functions |
 | Active weekly schedule | Select | Makes a stored weekly schedule the active one |
+| At home | Switch | Switches between at home and away while the schedule keeps running, like the house on the app's start screen; selecting a situation instead switches to the manual mode |
 | Absence planner | Switch | Saves or switches off the app's absence planner; the system runs in frost protection during the period |
 | Absence start / Absence end | Date and time | Period of the absence planner; while the planner is off, the period is kept until it is switched on |
 | Absence running | Binary sensor | On while the absence period runs |
@@ -129,6 +130,7 @@ ConnectBox reports the matching data.
 | Users | Diagnostic sensor | Number of paired apps; their names and last connection are attributes |
 | Country, Network connection, System version | Diagnostic sensors | Values of the app's settings and service pages |
 | Firmware update | Diagnostic sensor | Whether the units are up to date or an update runs, with its progress |
+| Firmware | Update | Installs a newer firmware package of the official app on the system (see below) |
 
 Per ventilation unit, **Room name** (text) and **Room type** (select) change
 the unit's room as on the app's room page.
@@ -153,9 +155,26 @@ data:
     - {start: "07:00", function: boost, duration_minutes: 15, room: Office}
 ```
 
+#### Firmware update
+
+The official app ships the firmware of the whole system as a file in its
+installation, for example `Gateway-1.8.1.fw` (on a Mac in
+`/Applications/ZehnderConnect.app/Wrapper/ZehnderConnect.app/`). The app
+offers it when it is newer than the installed system version and uploads it to
+the ConnectBox, which then updates itself and the ventilation units.
+
+Home Assistant cannot download this file. To install a newer version, copy the
+file from an updated app into the folder `zehnder_connectbox` of the Home
+Assistant configuration (for example with the Samba or Studio Code Server
+add-on). The **Firmware** update entity checks the file's header, length and
+checksum and offers it only when it is newer than the installed version. The
+upload takes a few minutes; the ConnectBox restarts afterwards and the entities
+are unavailable briefly. The update of the units is shown as progress while the
+ConnectBox reports it. A failed upload is aborted, so the installed firmware
+stays.
+
 Wi-Fi setup, pairing and removing apps or units, adding rooms, push
-notifications, starting a firmware update and the service partner access stay
-in the official app.
+notifications and the service partner access stay in the official app.
 
 ### Supported ventilation unit
 
