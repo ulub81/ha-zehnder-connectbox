@@ -475,5 +475,25 @@
     "cannot_connect": {
       "message": "Die Kommunikation mit der ConnectBox ist fehlgeschlagen. Prüfe die Verbindung und den tatsächlichen Gerätezustand vor einem erneuten Versuch."
     }
+  },
+  "services": {
+    "test_request": {
+      "name": "Testanfrage",
+      "description": "Temporärer Test-Build: sendet eine Anfrage an die ConnectBox und gibt die Struktur der Antwort zurück.",
+      "fields": {
+        "request": {
+          "name": "Anfragetyp",
+          "description": "Operationstyp."
+        },
+        "body": {
+          "name": "Body",
+          "description": "Nachrichteninhalt als Hexadezimalzahl."
+        },
+        "show_text": {
+          "name": "Text anzeigen",
+          "description": "Text außer den Namen des Zuhauses anzeigen."
+        }
+      }
+    }
   }
 }

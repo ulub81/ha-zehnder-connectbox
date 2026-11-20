@@ -168,7 +168,13 @@ def _small_number_fields(fields: tuple[Field, ...]) -> bool:
     )
 
 
-def _frame_structure(value: bytes, identities: dict[bytes, str], depth: int = 0) -> Any:
+def _frame_structure(
+    value: bytes,
+    identities: dict[bytes, str],
+    depth: int = 0,
+    *,
+    show_text: bool = False,
+) -> Any:
     """Temporary: show the body of an unsolicited frame by structure.
 
     Like _probe, with three differences for message bodies: nested messages
@@ -194,7 +200,7 @@ def _frame_structure(value: bytes, identities: dict[bytes, str], depth: int = 0)
             short["as_fields"] = {f"f{item.number}": int(item.value) for item in fields}
         return short or None
     if _is_text(value):
-        return f"text(len={len(value)})"
+        return value.decode() if show_text else f"text(len={len(value)})"
     if fields:
         out: dict[str, Any] = {}
         seen: Counter[int] = Counter()
@@ -205,7 +211,9 @@ def _frame_structure(value: bytes, identities: dict[bytes, str], depth: int = 0)
             if item.wire_type is WireType.VARINT:
                 out[key] = int(item.value)
             elif item.wire_type is WireType.BYTES:
-                out[key] = _frame_structure(bytes(item.value), identities, depth + 1)
+                out[key] = _frame_structure(
+                    bytes(item.value), identities, depth + 1, show_text=show_text
+                )
             else:
                 out[key] = f"fixed(len={len(item.value)})"
         return out
@@ -472,3 +480,17 @@ async def async_get_config_entry_diagnostics(
         capture["unsolicited_frames"] = {"error": type(err).__name__}
     result["capture"] = capture
     return result
+
+
+def test_response_structure(
+    entry: ZehnderConnectBoxConfigEntry, body: bytes, *, show_text: bool
+) -> Any:
+    """Temporary test build: show a test request's answer by structure.
+
+    Names and identities of the home stay hidden; other text, such as the
+    name of a schedule, is shown on request.
+    """
+    snapshot = entry.runtime_data.data
+    rooms = snapshot.rooms if snapshot is not None else ()
+    identities = _identity_labels(rooms, getattr(entry, "data", {}))
+    return _frame_structure(body, identities, show_text=show_text)

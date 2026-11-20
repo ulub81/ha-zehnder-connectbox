@@ -55,6 +55,19 @@ class ConnectBoxSession:
         timeout: float = 8.0,
     ) -> Response:
         """Send a request and wait for its matching confirmation."""
+        response = self.exchange(request_type, body, timeout=timeout)
+        if response.operation.type != confirmation_type:
+            raise ProtocolError("gateway returned an unexpected confirmation")
+        if response.operation.result not in (None, 0):
+            raise GatewayResponseError(
+                response.operation.result, response.operation.description
+            )
+        return response
+
+    def exchange(
+        self, request_type: int, body: bytes = b"", *, timeout: float = 8.0
+    ) -> Response:
+        """Send a request and return the frame that answers it, unchecked."""
         self._reference = self._reference % 0xFFFFFFFF + 1
         reference = self._reference
         operation = Operation(type=request_type, reference=reference)
@@ -81,12 +94,6 @@ class ConnectBoxSession:
                 if self._on_unsolicited is not None:
                     self._on_unsolicited(response_operation, received.body)
                 continue
-            if response_operation.type != confirmation_type:
-                raise ProtocolError("gateway returned an unexpected confirmation")
-            if response_operation.result not in (None, 0):
-                raise GatewayResponseError(
-                    response_operation.result, response_operation.description
-                )
             return Response(response_operation, received.body)
 
     def _read_frame(self) -> Frame:

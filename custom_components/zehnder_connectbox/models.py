@@ -88,7 +88,11 @@ class RunState:
     # Temporary capture build: the undecoded run-state message.
     raw: bytes = field(default=b"", repr=False, compare=False)
     week_plan: int | None = None
-    """ID of the active weekly schedule (1 and 2 in the app's order)."""
+    """ID of the active weekly schedule.
+
+    With the app's winter schedule active the run state reported 3 here and
+    daily schedule 1; with its summer schedule, 1 and daily schedule 2.
+    """
     day_plan: DayPlan | None = None
     """Today's daily schedule of the active weekly schedule."""
 

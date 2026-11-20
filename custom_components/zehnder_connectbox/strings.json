@@ -475,5 +475,25 @@
     "cannot_connect": {
       "message": "Communication with the ConnectBox failed. Check the connection and the actual device state before trying again."
     }
+  },
+  "services": {
+    "test_request": {
+      "name": "Test request",
+      "description": "Temporary test build: sends one request to the ConnectBox and returns the structure of its answer.",
+      "fields": {
+        "request": {
+          "name": "Request type",
+          "description": "Operation type."
+        },
+        "body": {
+          "name": "Body",
+          "description": "Hexadecimal message body."
+        },
+        "show_text": {
+          "name": "Show text",
+          "description": "Show text other than names of the home."
+        }
+      }
+    }
   }
 }

@@ -353,6 +353,15 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
                 partial(self.client.capture, targets, deadline=deadline)
             )
 
+    async def async_test_request(
+        self, request_type: int, body: bytes
+    ) -> tuple[int, int | None, str | None, bytes]:
+        """Temporary test build: send one request under the I/O lock."""
+        async with self._io_lock:
+            return await self.hass.async_add_executor_job(
+                self.client.test_request, request_type, body
+            )
+
     async def async_unsolicited_frames(
         self,
     ) -> dict[int, tuple[int, tuple[tuple[float, int | None, int | None, bytes], ...]]]:

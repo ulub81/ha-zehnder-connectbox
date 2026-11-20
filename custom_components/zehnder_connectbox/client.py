@@ -81,6 +81,7 @@ COMMAND_SETTLE_TIMEOUT = 10.0
 # A started boost may end this many seconds later than the room's duration
 # allows (clock differences) before it is stopped again as unexpected.
 BOOST_END_TOLERANCE = 300
+TEST_REQUEST_TIMEOUT = 6.0
 # Slow sequences read with the filter refresh, each in its own sequence after
 # the optional settings, so a unit that rejects one keeps its other telemetry.
 SLOW_PROPERTY_SEQUENCES: dict[str, Callable[[AttachedDevice], tuple[PropertySpec, ...]]] = {
@@ -798,6 +799,23 @@ class ConnectBoxClient:
         except (ProtocolError, TransportError):
             self.close()
             raise
+
+    def test_request(
+        self, request_type: int, body: bytes
+    ) -> tuple[int, int | None, str | None, bytes]:
+        """Temporary test build: send one request and return what answers it."""
+        try:
+            response = self._connected_session().exchange(
+                request_type, body, timeout=TEST_REQUEST_TIMEOUT
+            )
+        except (ProtocolError, TransportError):
+            self.close()
+            raise
+        operation = response.operation
+        if operation.result not in (None, 0):
+            # A refused request may leave a sequence open on the gateway.
+            self.close()
+        return operation.type, operation.result, operation.description, response.body
 
     def _find_room(self, room_id: int) -> Room | None:
         """Read the rooms and return one of them."""

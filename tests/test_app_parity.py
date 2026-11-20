@@ -686,6 +686,56 @@ def gateway_frame(operation, body=b""):
     return Frame(GATEWAY, APP, operation.encode(), body).encode()
 
 
+class TestRequestTests(unittest.TestCase):
+    def test_exchange_returns_any_answer_unchecked(self):
+        transport = FakeTransport(
+            [gateway_frame(Operation(type=777, result=5, reference=1), b"\x08\x01")]
+        )
+        session = ConnectBoxSession(transport, GATEWAY, APP)
+        response = session.exchange(776)
+        self.assertEqual(
+            (response.operation.type, response.operation.result, response.body),
+            (777, 5, b"\x08\x01"),
+        )
+
+    def test_request_still_checks_type_and_result(self):
+        for operation, error in (
+            (Operation(type=777, reference=1), ProtocolError),
+            (Operation(type=195, result=3, reference=1), GatewayResponseError),
+        ):
+            with self.subTest(operation=operation):
+                session = ConnectBoxSession(
+                    FakeTransport([gateway_frame(operation)]), GATEWAY, APP
+                )
+                with self.assertRaises(error):
+                    session.request(194, 195)
+
+    def test_client_closes_after_a_refused_test_request(self):
+        client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
+        client.close = Mock()
+        answers = [
+            SimpleNamespace(operation=Operation(type=241), body=b"ok"),
+            SimpleNamespace(operation=Operation(type=300, result=2), body=b""),
+        ]
+        client._connected_session = lambda: SimpleNamespace(
+            exchange=lambda *_args, **_kwargs: answers.pop(0)
+        )
+        self.assertEqual(client.test_request(240, b""), (241, None, None, b"ok"))
+        client.close.assert_not_called()
+        self.assertEqual(client.test_request(299, b""), (300, 2, None, b""))
+        client.close.assert_called_once_with()
+
+    def test_structure_shows_text_only_on_request(self):
+        body = encode_uint(1, 2) + encode_string(2, "Sommertagesplan")
+        self.assertEqual(
+            diagnostics._frame_structure(body, {}), {"f1": 2, "f2": "text(len=15)"}
+        )
+        self.assertEqual(
+            diagnostics._frame_structure(body, {}, show_text=True),
+            {"f1": 2, "f2": "Sommertagesplan"},
+        )
+
+
 class UnsolicitedFrameTests(unittest.TestCase):
     def test_session_reports_frames_that_answer_no_request(self):
         seen = []
@@ -927,8 +977,10 @@ class ProfileTests(unittest.TestCase):
         self.assertIsNone(profiles.automatic_sensors(odd))
 
 
-def run_state_message(*, week_plan=1, slots=((0, 1), (480, 0), (1260, 1)), name=b"Wintertagesplan"):
-    plan = encode_uint(1, week_plan) + encode_bytes(2, name)
+def run_state_message(
+    *, week_plan=3, day_plan=1, slots=((0, 1), (480, 0), (1260, 1)), name=b"Wintertagesplan"
+):
+    plan = encode_uint(1, day_plan) + encode_bytes(2, name)
     for minute, mode in slots:
         slot = (encode_uint(1, minute) if minute else b"") + (
             encode_uint(2, mode) if mode else b""
@@ -940,8 +992,8 @@ def run_state_message(*, week_plan=1, slots=((0, 1), (480, 0), (1260, 1)), name=
             encode_uint(2, 0),
             encode_uint(3, 1),
             encode_bytes(4, plan),
-            encode_uint(5, week_plan),
-            encode_uint(6, 3),
+            encode_uint(5, day_plan),
+            encode_uint(6, week_plan),
             encode_uint(12, 0),
         )
     )
@@ -951,14 +1003,19 @@ def run_state_message(*, week_plan=1, slots=((0, 1), (480, 0), (1260, 1)), name=
 class ScheduleProtocolTests(unittest.TestCase):
     def test_run_state_reports_week_and_day_plan(self):
         state = decode_run_state(run_state_message())
-        self.assertEqual(state.week_plan, 1)
+        self.assertEqual(state.week_plan, 3)
         self.assertEqual(state.day_plan.plan_id, 1)
         self.assertEqual(state.day_plan.name, "Wintertagesplan")
         self.assertEqual(state.day_plan.slots, ((0, 1), (480, 0), (1260, 1)))
         summer = decode_run_state(
-            run_state_message(week_plan=2, slots=((0, 1), (480, 2), (1350, 0)))
+            run_state_message(
+                week_plan=1, day_plan=2, slots=((0, 1), (480, 2), (1350, 0))
+            )
         )
-        self.assertEqual((summer.week_plan, summer.day_plan.slots[1]), (2, (480, 2)))
+        self.assertEqual(
+            (summer.week_plan, summer.day_plan.plan_id, summer.day_plan.slots[1]),
+            (1, 2, (480, 2)),
+        )
 
     def test_run_state_without_plan(self):
         inner = encode_uint(1, 2) + encode_uint(2, 0)
@@ -1109,7 +1166,7 @@ class ScheduleAndSettingEntityTests(unittest.TestCase):
             plan.extra_state_attributes,
             {
                 "day_plan": 1,
-                "week_plan": 1,
+                "week_plan": 3,
                 "slots": [
                     {"start": "00:00", "situation": "asleep"},
                     {"start": "08:00", "situation": "awake"},

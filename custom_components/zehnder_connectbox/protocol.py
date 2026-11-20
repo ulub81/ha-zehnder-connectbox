@@ -236,7 +236,8 @@ def decode_run_state(message: bytes) -> RunState:
         summer_ventilation_end=uint_value(fields, 13),
         errors=uint_values(fields, 11),
         raw=inner,
-        week_plan=uint_value(fields, 5),
+        # Field 5 repeats the ID of today's daily schedule (field 4).
+        week_plan=uint_value(fields, 6),
         day_plan=_decode_day_plan(bytes_value(fields, 4)),
     )
 
