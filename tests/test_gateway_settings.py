@@ -22,6 +22,7 @@ from custom_components.zehnder_connectbox import select, sensor, switch, text
 from custom_components.zehnder_connectbox.client import ConnectBoxClient
 from custom_components.zehnder_connectbox.errors import CommandValidationError
 from custom_components.zehnder_connectbox.models import (
+    ActionLogEntry,
     PairedApp,
     UpdateProgress,
     VersionInfo,
@@ -38,7 +39,9 @@ from custom_components.zehnder_connectbox.protobuf import (
 from custom_components.zehnder_connectbox.protocol import (
     OperationType,
     ProtocolError,
+    decode_action_log,
     decode_paired_apps,
+    decode_remote_access,
     decode_rooms,
     decode_site_info,
     decode_update_progress,
@@ -152,6 +155,30 @@ class ProtocolTests(unittest.TestCase):
             encode_room_settings(room)
         with self.assertRaises(ValueError):
             encode_room_settings(room, name="x" * 33)
+
+    def test_history_and_internet_access(self):
+        def entry(nickname, timestamp, message, *params):
+            return encode_bytes(
+                1,
+                encode_string(1, nickname)
+                + encode_uint(2, timestamp)
+                + encode_string(3, message)
+                + b"".join(encode_string(4, item) for item in params)
+                + encode_bytes(4, b""),
+            )
+
+        log = decode_action_log(
+            entry("ComfoRF DUTY CYCLE", 1795202340, "53 24h:53 MAX:55")
+            + entry("Home Assistant", 1795202340, "REMOVED_DAYPLAN", "HA Test")
+            + entry("Mac", 1795201140, "CHANGED_DAYPLAN", "Test")
+        )
+        self.assertEqual(len(log), 3)
+        self.assertEqual(log[1].message, "REMOVED_DAYPLAN")
+        self.assertEqual(log[1].params, ("HA Test",))
+        self.assertEqual(log[0].params, ())
+        self.assertTrue(decode_remote_access(encode_uint(1, 0)))
+        self.assertFalse(decode_remote_access(encode_uint(1, 1)))
+        self.assertIsNone(decode_remote_access(b""))
 
 
 class FakeSettingsGateway:
@@ -432,6 +459,31 @@ class EntityTests(unittest.TestCase):
         self.assertEqual(
             sensor._update_state(UpdateProgress(None, None, None, (), (9,))), "queued"
         )
+
+    def test_history_and_duty_cycle_sensors(self):
+        log = (
+            ActionLogEntry("ComfoRF DUTY CYCLE", 1795202400, "53 24h:52 MAX:55"),
+            ActionLogEntry("Home Assistant", 1795202340, "CHANGED_DAYPLAN", ("Test",)),
+            ActionLogEntry("Mac", 1795201140, "ADDED_DAYPLAN", ("Test",)),
+        )
+        coordinator = SettingsCoordinator(settings_snapshot(action_log=log))
+        entities = set_up(sensor, coordinator)
+        history = next(
+            item
+            for item in entities
+            if isinstance(item, sensor.ConnectBoxHistorySensor)
+        )
+        duty = next(
+            item
+            for item in entities
+            if isinstance(item, sensor.ConnectBoxDutyCycleSensor)
+        )
+        self.assertEqual(history.native_value, "CHANGED_DAYPLAN: Test")
+        attributes = history.extra_state_attributes
+        self.assertEqual(attributes["by"], "Home Assistant")
+        self.assertEqual(len(attributes["entries"]), 2)
+        self.assertEqual(duty.native_value, 53)
+        self.assertEqual(duty.extra_state_attributes["last_24_hours"], 52)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Check the firmware package, its upload and the presence switch offline."""
+"""Check the firmware package, its upload and the update entity offline."""
 
 import asyncio
 import struct
@@ -8,7 +8,7 @@ import zlib
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from homeassistant.exceptions import HomeAssistantError
 from test_app_parity import (
@@ -16,13 +16,10 @@ from test_app_parity import (
     GATEWAY,
     FakeCoordinator,
     rooms_message,
-    run_state_message,
-    set_up,
     snapshot,
 )
 
-from custom_components.zehnder_connectbox import client as client_mod
-from custom_components.zehnder_connectbox import switch, update
+from custom_components.zehnder_connectbox import update
 from custom_components.zehnder_connectbox.client import ConnectBoxClient
 from custom_components.zehnder_connectbox.errors import CommandValidationError
 from custom_components.zehnder_connectbox.firmware import (
@@ -34,7 +31,6 @@ from custom_components.zehnder_connectbox.models import UpdateProgress, VersionI
 from custom_components.zehnder_connectbox.protobuf import (
     bytes_value,
     decode_fields,
-    encode_bytes,
     encode_uint,
     uint_value,
 )
@@ -42,7 +38,6 @@ from custom_components.zehnder_connectbox.protocol import (
     OperationType,
     ProtocolError,
     UpgradeCommand,
-    decode_run_state,
     encode_upgrade,
 )
 from custom_components.zehnder_connectbox.session import GatewayResponseError
@@ -178,62 +173,6 @@ class UploadTests(unittest.TestCase):
             client.upload_firmware(self.package, lambda *_: None)
         self.assertEqual(err.exception.translation_key, "firmware_update_locked")
         self.assertEqual(gateway.commands, [0])
-
-
-class PresenceTests(unittest.TestCase):
-    def test_presence_keeps_the_schedule_running(self):
-        state = {"location": 1}
-
-        def request(request, confirm, body=b"", **_kwargs):
-            if request == OperationType.SET_RUN_STATE_REQUEST:
-                fields = decode_fields(body)
-                self.assertEqual(uint_value(fields, 1), 1)
-                state["location"] = uint_value(fields, 2)
-                return SimpleNamespace(body=b"")
-            if request == OperationType.RUN_STATE_REQUEST:
-                message = run_state_message()
-                inner = bytes_value(decode_fields(message), 1)
-                if state["location"] == 2:
-                    inner = inner.replace(encode_uint(2, 0), encode_uint(2, 2))
-                    inner = inner.replace(encode_uint(3, 1), encode_uint(3, 2))
-                return SimpleNamespace(body=encode_bytes(1, inner))
-            if request == OperationType.ROOMS_REQUEST:
-                return SimpleNamespace(body=rooms_message())
-            raise AssertionError(request)
-
-        client = make_client(SimpleNamespace(request=request))
-        with patch.object(client_mod, "LEVEL_SETTLE_POLL_INTERVAL", 0):
-            away = client.set_presence(False)
-            self.assertEqual(
-                (away.run_state.temperature_mode, away.run_state.situation_source),
-                (2, 2),
-            )
-            home = client.set_presence(True)
-        self.assertEqual(home.run_state.temperature_mode, 0)
-
-    def test_presence_switch(self):
-        data = snapshot(rooms_message())
-        data = replace(data, run_state=decode_run_state(run_state_message()))
-        coordinator = FakeCoordinator(data)
-        calls = []
-
-        async def set_presence(home):
-            calls.append(home)
-
-        coordinator.async_set_presence = set_presence
-        entity = next(
-            e
-            for e in set_up(switch, coordinator)
-            if isinstance(e, switch.ConnectBoxPresenceSwitch)
-        )
-        self.assertTrue(entity.is_on)
-        self.assertTrue(entity.available)
-        self.assertEqual(entity.extra_state_attributes, {"source": "schedule"})
-        asyncio.run(entity.async_turn_off())
-        self.assertEqual(calls, [False])
-        manual = replace(data, run_state=replace(data.run_state, run_mode=2))
-        coordinator.data = manual
-        self.assertFalse(entity.available)
 
 
 class UpdateEntityTests(unittest.TestCase):

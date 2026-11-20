@@ -26,7 +26,6 @@ from test_app_parity import (
 from custom_components.zehnder_connectbox import (
     binary_sensor,
     select,
-    sensor,
     services,
     switch,
 )
@@ -34,7 +33,6 @@ from custom_components.zehnder_connectbox import client as client_mod
 from custom_components.zehnder_connectbox.client import ConnectBoxClient
 from custom_components.zehnder_connectbox.errors import CommandValidationError
 from custom_components.zehnder_connectbox.models import (
-    ActionLogEntry,
     DayPlan,
     ScheduledFunction,
     VersionInfo,
@@ -51,9 +49,7 @@ from custom_components.zehnder_connectbox.protobuf import (
 from custom_components.zehnder_connectbox.protocol import (
     OperationType,
     ProtocolError,
-    decode_action_log,
     decode_day_plan_confirm,
-    decode_remote_access,
     decode_run_state,
     decode_schedules,
     decode_week_plan_confirm,
@@ -140,30 +136,6 @@ class EncodingTests(unittest.TestCase):
             + b"".join(encode_uint(number, 4) for number in range(3, 10)),
         )
         self.assertEqual(decode_week_plan_confirm(week).days, (4,) * 7)
-
-    def test_history_and_internet_access(self):
-        def entry(nickname, timestamp, message, *params):
-            return encode_bytes(
-                1,
-                encode_string(1, nickname)
-                + encode_uint(2, timestamp)
-                + encode_string(3, message)
-                + b"".join(encode_string(4, item) for item in params)
-                + encode_bytes(4, b""),
-            )
-
-        log = decode_action_log(
-            entry("ComfoRF DUTY CYCLE", 1795202340, "53 24h:53 MAX:55")
-            + entry("Home Assistant", 1795202340, "REMOVED_DAYPLAN", "HA Test")
-            + entry("Mac", 1795201140, "CHANGED_DAYPLAN", "Test")
-        )
-        self.assertEqual(len(log), 3)
-        self.assertEqual(log[1].message, "REMOVED_DAYPLAN")
-        self.assertEqual(log[1].params, ("HA Test",))
-        self.assertEqual(log[0].params, ())
-        self.assertTrue(decode_remote_access(encode_uint(1, 0)))
-        self.assertFalse(decode_remote_access(encode_uint(1, 1)))
-        self.assertIsNone(decode_remote_access(b""))
 
 
 class FakeScheduleGateway:
@@ -439,7 +411,6 @@ class EntityTests(unittest.TestCase):
     def test_absence_switch_and_indicators(self):
         data = schedule_snapshot(
             run_state=decode_run_state(absence_state(planned=True)),
-            remote_access=True,
         )
         coordinator = FakeCoordinator(data)
         coordinator.absence_period = lambda: (ABSENCE_START, ABSENCE_END)
@@ -458,32 +429,6 @@ class EntityTests(unittest.TestCase):
             if isinstance(item, binary_sensor.ConnectBoxGatewayBinarySensor)
         }
         self.assertFalse(indicators["absence_active"].is_on)
-        self.assertNotIn("remote_access", indicators)
-
-    def test_history_and_duty_cycle_sensors(self):
-        log = (
-            ActionLogEntry("ComfoRF DUTY CYCLE", 1795202400, "53 24h:52 MAX:55"),
-            ActionLogEntry("Home Assistant", 1795202340, "CHANGED_DAYPLAN", ("Test",)),
-            ActionLogEntry("Mac", 1795201140, "ADDED_DAYPLAN", ("Test",)),
-        )
-        coordinator = FakeCoordinator(schedule_snapshot(action_log=log))
-        entities = set_up(sensor, coordinator)
-        history = next(
-            item
-            for item in entities
-            if isinstance(item, sensor.ConnectBoxHistorySensor)
-        )
-        duty = next(
-            item
-            for item in entities
-            if isinstance(item, sensor.ConnectBoxDutyCycleSensor)
-        )
-        self.assertEqual(history.native_value, "CHANGED_DAYPLAN: Test")
-        attributes = history.extra_state_attributes
-        self.assertEqual(attributes["by"], "Home Assistant")
-        self.assertEqual(len(attributes["entries"]), 2)
-        self.assertEqual(duty.native_value, 53)
-        self.assertEqual(duty.extra_state_attributes["last_24_hours"], 52)
 
 
 class ServiceHelperTests(unittest.TestCase):
@@ -527,6 +472,62 @@ class ServiceHelperTests(unittest.TestCase):
             )
         with self.assertRaises(vol.Invalid):
             services.SAVE_DAY_PLAN_SCHEMA({"name": "x" * 33})
+
+
+class PresenceTests(unittest.TestCase):
+    def test_presence_keeps_the_schedule_running(self):
+        state = {"location": 1}
+
+        def request(request, confirm, body=b"", **_kwargs):
+            if request == OperationType.SET_RUN_STATE_REQUEST:
+                fields = decode_fields(body)
+                self.assertEqual(uint_value(fields, 1), 1)
+                state["location"] = uint_value(fields, 2)
+                return SimpleNamespace(body=b"")
+            if request == OperationType.RUN_STATE_REQUEST:
+                message = run_state_message()
+                inner = bytes_value(decode_fields(message), 1)
+                if state["location"] == 2:
+                    inner = inner.replace(encode_uint(2, 0), encode_uint(2, 2))
+                    inner = inner.replace(encode_uint(3, 1), encode_uint(3, 2))
+                return SimpleNamespace(body=encode_bytes(1, inner))
+            if request == OperationType.ROOMS_REQUEST:
+                return SimpleNamespace(body=rooms_message())
+            raise AssertionError(request)
+
+        client = make_client(SimpleNamespace(request=request))
+        with patch.object(client_mod, "LEVEL_SETTLE_POLL_INTERVAL", 0):
+            away = client.set_presence(False)
+            self.assertEqual(
+                (away.run_state.temperature_mode, away.run_state.situation_source),
+                (2, 2),
+            )
+            home = client.set_presence(True)
+        self.assertEqual(home.run_state.temperature_mode, 0)
+
+    def test_presence_switch(self):
+        data = snapshot(rooms_message())
+        data = replace(data, run_state=decode_run_state(run_state_message()))
+        coordinator = FakeCoordinator(data)
+        calls = []
+
+        async def set_presence(home):
+            calls.append(home)
+
+        coordinator.async_set_presence = set_presence
+        entity = next(
+            e
+            for e in set_up(switch, coordinator)
+            if isinstance(e, switch.ConnectBoxPresenceSwitch)
+        )
+        self.assertTrue(entity.is_on)
+        self.assertTrue(entity.available)
+        self.assertEqual(entity.extra_state_attributes, {"source": "schedule"})
+        asyncio.run(entity.async_turn_off())
+        self.assertEqual(calls, [False])
+        manual = replace(data, run_state=replace(data.run_state, run_mode=2))
+        coordinator.data = manual
+        self.assertFalse(entity.available)
 
 
 if __name__ == "__main__":
