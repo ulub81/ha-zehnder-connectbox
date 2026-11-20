@@ -109,6 +109,54 @@ summer ventilation role sensor.
 The ConnectBox firmware version is shown in its Home Assistant device
 information when reported by the gateway.
 
+#### Schedules, absence planner and system settings
+
+These entities follow the pages of the official app. They appear once the
+ConnectBox reports the matching data.
+
+| Entity | Home Assistant type | Function |
+| --- | --- | --- |
+| Weekly schedule / Daily schedule | Sensor | Active weekly schedule with all stored schedules, and today's daily schedule with its switching times and timed functions |
+| Active weekly schedule | Select | Makes a stored weekly schedule the active one |
+| Absence planner | Switch | Saves or switches off the app's absence planner; the system runs in frost protection during the period |
+| Absence start / Absence end | Date and time | Period of the absence planner; while the planner is off, the period is kept until it is switched on |
+| Absence running | Binary sensor | On while the absence period runs |
+| History | Sensor | Latest entry of the app's history; all returned entries are attributes |
+| Radio duty cycle | Diagnostic sensor | Duty cycle the ConnectBox logs in its history, as logged |
+| System name | Configuration text | Name of the system, as on the app's system name and language page |
+| System language | Configuration select | German, English, French or Dutch |
+| Internet access | Configuration switch | Whether the official app may reach the ConnectBox over the internet; this integration always connects locally |
+| Users | Diagnostic sensor | Number of paired apps; their names and last connection are attributes |
+| Country, Network connection, System version | Diagnostic sensors | Values of the app's settings and service pages |
+| Firmware update | Diagnostic sensor | Whether the units are up to date or an update runs, with its progress |
+
+Per ventilation unit, **Room name** (text) and **Room type** (select) change
+the unit's room as on the app's room page.
+
+The services `zehnder_connectbox.save_day_plan`, `remove_day_plan`,
+`save_week_plan` and `remove_week_plan` add, change and remove schedules.
+Schedules are referred to by name or ID; parts left out of a change stay as
+they are. A daily schedule switches between `awake`, `asleep` and `away` and
+needs a switching time at 00:00. Timed functions are `boost` (for a room whose
+unit offers it) and `summer_ventilation`. A weekly schedule lists the daily
+schedules from Monday to Sunday, or one for the whole week.
+
+```yaml
+action: zehnder_connectbox.save_day_plan
+data:
+  name: Home office
+  slots:
+    - {start: "00:00", situation: asleep}
+    - {start: "07:00", situation: awake}
+    - {start: "22:30", situation: asleep}
+  functions:
+    - {start: "07:00", function: boost, duration_minutes: 15, room: Office}
+```
+
+Wi-Fi setup, pairing and removing apps or units, adding rooms, push
+notifications, starting a firmware update and the service partner access stay
+in the official app.
+
 ### Supported ventilation unit
 
 | Entity | Home Assistant type | Function |

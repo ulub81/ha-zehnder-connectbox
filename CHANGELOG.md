@@ -20,8 +20,13 @@ project follows [Semantic Versioning](https://semver.org/).
   indicator while the absence runs.
 - Add services to add, change and remove daily schedules (switching times
   and timed boost or summer ventilation) and weekly schedules.
-- Show the app's history (Verlauf), the radio duty cycle the ConnectBox logs
-  and whether access over the internet is enabled.
+- Show the app's history (Verlauf) and the radio duty cycle the ConnectBox
+  logs.
+- Change the system name and language, switch the access over the internet,
+  and change each room's name and type, as on the app's settings pages.
+- Show the paired apps (Benutzer), the country and network connection, the
+  system version and the firmware update state of the units, and register
+  the ConnectBox's serial number.
 
 ### Changed
 

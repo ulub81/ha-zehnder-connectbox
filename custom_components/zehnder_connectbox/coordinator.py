@@ -503,6 +503,58 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
         self._accept_command_snapshot(snapshot)
         return plan_id
 
+    async def async_set_site_info(
+        self, *, name: str | None = None, language: int | None = None
+    ) -> None:
+        """Change the system name or language and log the outcome."""
+        details: dict[str, object] = {"write": "site"}
+        if name is not None:
+            details["name_bytes"] = len(name.encode())
+        if language is not None:
+            details["language"] = language
+
+        def read_back(snapshot: GatewaySnapshot) -> dict[str, object] | None:
+            site = snapshot.site
+            return {"language": site.language} if site is not None else None
+
+        await self._async_logged_write(
+            details,
+            partial(self.client.set_site_info, name=name, language=language),
+            read_back,
+        )
+
+    async def async_set_remote_access(self, enabled: bool) -> None:
+        """Switch the access over the internet and log the outcome."""
+        await self._async_logged_write(
+            {"write": "remote_access", "value": enabled},
+            partial(self.client.set_remote_access, enabled),
+            lambda snapshot: {"remote_access": snapshot.remote_access},
+        )
+
+    async def async_set_room_settings(
+        self, room_id: int, *, name: str | None = None, room_type: int | None = None
+    ) -> None:
+        """Change a room's name or type and log the outcome."""
+        details: dict[str, object] = {"room": room_id, "write": "room_settings"}
+        if name is not None:
+            details["name_bytes"] = len(name.encode())
+        if room_type is not None:
+            details["room_type"] = room_type
+
+        def read_back(snapshot: GatewaySnapshot) -> dict[str, object] | None:
+            room = next(
+                (item for item in snapshot.rooms if item.room_id == room_id), None
+            )
+            return {"room_type": room.room_type} if room is not None else None
+
+        await self._async_logged_write(
+            details,
+            partial(
+                self.client.set_room_settings, room_id, name=name, room_type=room_type
+            ),
+            read_back,
+        )
+
     async def async_capture(
         self,
     ) -> tuple[RunState, tuple[Room, ...], dict[int, dict[str, object]]]:
@@ -608,6 +660,7 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
             model="ConnectBox CU-RF-ZMA",
             name=self.entry.title or DEFAULT_NAME,
             sw_version=format_version(snapshot.version.connectbox_version),
+            serial_number=snapshot.version.serial_number,
         )
         for room in snapshot.rooms:
             for device in room.devices:

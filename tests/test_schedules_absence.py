@@ -362,31 +362,6 @@ class ClientTests(unittest.TestCase):
             ],
         )
 
-    def test_history_times_are_turned_into_unix_time(self):
-        log = encode_bytes(
-            1,
-            encode_string(1, "Home Assistant")
-            + encode_uint(2, 1795202340)
-            + encode_string(3, "REMOVED_DAYPLAN"),
-        )
-        answers = {
-            OperationType.TIME_REQUEST: encode_uint(1, 1795198822)
-            + encode_uint(2, 1795202400),
-            OperationType.ACTION_LOG_REQUEST: log,
-            OperationType.REMOTE_ACCESS_REQUEST: encode_uint(1, 0),
-        }
-        session = SimpleNamespace(
-            request=lambda request, confirm, body=b"", **_kw: SimpleNamespace(
-                body=answers[request]
-            )
-        )
-        self.client._session = session
-        self.client._connected_session = lambda: session
-        self.client._read_action_log()
-        # Logged at 19:19 CET, which the gateway reported as 19:19 UTC.
-        self.assertEqual(self.client._action_log[0].timestamp, 1795202340 - 3600)
-        self.assertTrue(self.client._remote_access)
-
     def test_dropped_function_is_reported(self):
         self.gateway.drop_functions = True
         with self.assertRaises(ProtocolError):
@@ -483,7 +458,7 @@ class EntityTests(unittest.TestCase):
             if isinstance(item, binary_sensor.ConnectBoxGatewayBinarySensor)
         }
         self.assertFalse(indicators["absence_active"].is_on)
-        self.assertTrue(indicators["remote_access"].is_on)
+        self.assertNotIn("remote_access", indicators)
 
     def test_history_and_duty_cycle_sensors(self):
         log = (

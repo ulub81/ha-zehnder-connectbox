@@ -57,6 +57,8 @@ class VersionInfo:
     property_list_version: int | None
     zone_state_list_version: int | None
     connectbox_version: int | None
+    serial_number: str | None = None
+    """Serial number of the ConnectBox, as on the app's service page."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +145,45 @@ class ActionLogEntry:
     """
     message: str | None
     params: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SiteInfo:
+    """The app's system name and language page (Systemname und Sprache).
+
+    Language and location are the numbers of the app's enumerations (German
+    is 2, Germany is 2). The app offers no time zone; the gateway reported an
+    index and a name such as Europe/Berlin next to the country.
+    """
+
+    name: str | None
+    language: int | None
+    location: int | None
+    timezone: int | None
+    timezone_name: str | None
+    network_mode: int | None
+    raw: bytes = field(default=b"", repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PairedApp:
+    """A paired client, as on the app's user page (Benutzer)."""
+
+    app_id: int | None
+    nickname: str | None
+    last_active: int | None
+    """Last connection as Unix time (see ActionLogEntry.timestamp)."""
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateProgress:
+    """Progress of a firmware update of the units, as on the app's update page."""
+
+    remaining_minutes: int | None
+    updating_device_id: int | None
+    progress: int | None
+    up_to_date_device_ids: tuple[int, ...]
+    queued_device_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +361,9 @@ class GatewaySnapshot:
     schedules: Schedules | None = None
     action_log: tuple[ActionLogEntry, ...] | None = None
     remote_access: bool | None = None
+    site: SiteInfo | None = None
+    paired_apps: tuple[PairedApp, ...] | None = None
+    update_progress: UpdateProgress | None = None
 
     def find_device(self, device_id: int) -> tuple[Room, AttachedDevice] | None:
         """Find a device together with its containing room."""

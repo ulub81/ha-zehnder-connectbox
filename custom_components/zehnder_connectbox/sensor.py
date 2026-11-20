@@ -30,7 +30,14 @@ from .entity import (
     ConnectBoxGatewayEntity,
     supported_device_ids,
 )
-from .models import ActionLogEntry, AttachedDevice, DayPlan, GatewaySnapshot, Room
+from .models import (
+    ActionLogEntry,
+    AttachedDevice,
+    DayPlan,
+    GatewaySnapshot,
+    Room,
+    UpdateProgress,
+)
 from .profiles import (
     AUTOMATIC_SENSOR_STATES,
     BATH_FUNCTION_STATES,
@@ -51,6 +58,7 @@ from .profiles import (
     bath_function,
     board_reading,
     error_log,
+    format_version,
     summer_ventilation_role,
     supply_only_operation,
     temperature_value,
@@ -317,6 +325,13 @@ async def async_setup_entry(
             new_entities.append(ConnectBoxHistorySensor(coordinator))
             new_entities.append(ConnectBoxDutyCycleSensor(coordinator))
             known.add((0, "history"))
+        # Values of the app's settings pages, once the gateway reports them.
+        for description in GATEWAY_SENSORS:
+            identity = (0, description.key)
+            if identity in known or description.value_fn(coordinator.data) is None:
+                continue
+            new_entities.append(ConnectBoxGatewaySensor(coordinator, description))
+            known.add(identity)
         if new_entities:
             async_add_entities(new_entities)
 
@@ -718,4 +733,169 @@ class ConnectBoxDutyCycleSensor(ConnectBoxGatewayEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Report unavailable until the gateway logged a duty cycle."""
+        return super().available and self.native_value is not None
+
+
+# Countries of the app's enumeration, as on its system name and language page.
+COUNTRIES = {
+    1: "united_kingdom",
+    2: "germany",
+    3: "france",
+    4: "netherlands",
+    5: "spain",
+    6: "portugal",
+    7: "italy",
+    8: "switzerland",
+    9: "austria",
+    10: "belgium",
+}
+# How the ConnectBox is connected, from the app's enumeration.
+NETWORK_MODES = {0: "lan", 1: "wifi_access_point", 2: "wifi"}
+UPDATE_STATES = ("up_to_date", "updating", "queued")
+
+
+def _update_state(progress: UpdateProgress | None) -> str | None:
+    """Summarise the firmware update of the units, as on the app's page."""
+    if progress is None:
+        return None
+    if progress.updating_device_id:
+        return "updating"
+    if progress.queued_device_ids:
+        return "queued"
+    return "up_to_date"
+
+
+def _device_rooms(snapshot: GatewaySnapshot, device_ids: tuple[int, ...]) -> list[str]:
+    names = {
+        device.device_id: room.name for room in snapshot.rooms for device in room.devices
+    }
+    return [names.get(device_id, str(device_id)) for device_id in device_ids]
+
+
+def _update_attributes(snapshot: GatewaySnapshot) -> dict[str, object] | None:
+    progress = snapshot.update_progress
+    if progress is None:
+        return None
+    updating = (
+        _device_rooms(snapshot, (progress.updating_device_id,))[0]
+        if progress.updating_device_id
+        else None
+    )
+    return {
+        "updating": updating,
+        "progress": progress.progress if updating else None,
+        "remaining_minutes": progress.remaining_minutes if updating else None,
+        "up_to_date": _device_rooms(snapshot, progress.up_to_date_device_ids),
+        "queued": _device_rooms(snapshot, progress.queued_device_ids),
+    }
+
+
+def _users_attributes(snapshot: GatewaySnapshot) -> dict[str, object] | None:
+    if snapshot.paired_apps is None:
+        return None
+    return {
+        "users": [
+            {"name": app.nickname, "last_active": _timestamp(app.last_active)}
+            for app in snapshot.paired_apps
+        ]
+    }
+
+
+@dataclass(frozen=True, kw_only=True)
+class ConnectBoxGatewaySensorDescription(SensorEntityDescription):
+    """Describe a value of the ConnectBox itself."""
+
+    value_fn: Callable[[GatewaySnapshot], int | str | None]
+    attributes_fn: Callable[[GatewaySnapshot], dict[str, object] | None] | None = None
+
+
+GATEWAY_SENSORS = (
+    # The app's user page (Benutzer): the paired clients.
+    ConnectBoxGatewaySensorDescription(
+        key="users",
+        translation_key="users",
+        icon="mdi:account-multiple",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda snapshot: (
+            len(snapshot.paired_apps) if snapshot.paired_apps is not None else None
+        ),
+        attributes_fn=_users_attributes,
+    ),
+    ConnectBoxGatewaySensorDescription(
+        key="country",
+        translation_key="country",
+        icon="mdi:earth",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(COUNTRIES.values()),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda snapshot: (
+            COUNTRIES.get(snapshot.site.location) if snapshot.site else None
+        ),
+        attributes_fn=lambda snapshot: (
+            {"time_zone": snapshot.site.timezone_name} if snapshot.site else None
+        ),
+    ),
+    ConnectBoxGatewaySensorDescription(
+        key="network_connection",
+        translation_key="network_connection",
+        icon="mdi:lan",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(NETWORK_MODES.values()),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda snapshot: (
+            NETWORK_MODES.get(snapshot.site.network_mode or 0)
+            if snapshot.site
+            else None
+        ),
+    ),
+    # The app's service page: the version of the whole system.
+    ConnectBoxGatewaySensorDescription(
+        key="system_version",
+        translation_key="system_version",
+        icon="mdi:tag",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda snapshot: format_version(snapshot.version.system_version),
+    ),
+    # The app's update page: the firmware update of the units.
+    ConnectBoxGatewaySensorDescription(
+        key="firmware_update",
+        translation_key="firmware_update",
+        icon="mdi:update",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(UPDATE_STATES),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda snapshot: _update_state(snapshot.update_progress),
+        attributes_fn=_update_attributes,
+    ),
+)
+
+
+class ConnectBoxGatewaySensor(ConnectBoxGatewayEntity, SensorEntity):
+    """One value of the ConnectBox itself."""
+
+    entity_description: ConnectBoxGatewaySensorDescription
+
+    def __init__(self, coordinator, description) -> None:
+        super().__init__(coordinator)
+        self.entity_description = description
+        gateway_uuid = coordinator.entry.data[CONF_GATEWAY_UUID]
+        self._attr_unique_id = f"{gateway_uuid}_{description.key}"
+
+    @property
+    def native_value(self) -> int | str | None:
+        """Return the reported value."""
+        snapshot = self.coordinator.data
+        return self.entity_description.value_fn(snapshot) if snapshot else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object] | None:
+        """Return the details, if the description has any."""
+        snapshot = self.coordinator.data
+        if snapshot is None or self.entity_description.attributes_fn is None:
+            return None
+        return self.entity_description.attributes_fn(snapshot)
+
+    @property
+    def available(self) -> bool:
+        """Report unavailable while the gateway does not report the value."""
         return super().available and self.native_value is not None

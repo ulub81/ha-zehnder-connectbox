@@ -8,6 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
 
 from .client import ConnectBoxClient
@@ -28,6 +29,7 @@ PLATFORMS = (
     Platform.SWITCH,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
+    Platform.TEXT,
 )
 
 type ZehnderConnectBoxConfigEntry = ConfigEntry[ZehnderConnectBoxCoordinator]
@@ -55,6 +57,13 @@ async def async_setup_entry(
     coordinator = ZehnderConnectBoxCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
+    # The internet access was briefly shown as an indicator; it is a switch.
+    registry = er.async_get(hass)
+    stale = registry.async_get_entity_id(
+        "binary_sensor", DOMAIN, f"{entry.data[CONF_GATEWAY_UUID]}_remote_access"
+    )
+    if stale is not None:
+        registry.async_remove(stale)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

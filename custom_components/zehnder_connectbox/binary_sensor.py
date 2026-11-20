@@ -113,14 +113,6 @@ GATEWAY_BINARY_SENSORS = (
         icon="mdi:bag-suitcase",
         value_fn=lambda snapshot: snapshot.run_state.standby,
     ),
-    # The app's "Zugriff über Internet" setting.
-    ConnectBoxGatewayBinarySensorDescription(
-        key="remote_access",
-        translation_key="remote_access",
-        device_class=BinarySensorDeviceClass.CONNECTIVITY,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda snapshot: snapshot.remote_access,
-    ),
 )
 
 
