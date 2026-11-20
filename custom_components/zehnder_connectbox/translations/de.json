@@ -338,6 +338,9 @@
       },
       "day_plan": {
         "name": "Tagesplan"
+      },
+      "week_plan": {
+        "name": "Wochenplan"
       }
     },
     "switch": {

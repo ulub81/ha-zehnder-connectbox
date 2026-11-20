@@ -24,6 +24,7 @@ from .models import (
     Room,
     RunMode,
     RunState,
+    Schedules,
     SummerVentilationSettings,
     TemperatureMode,
     VersionInfo,
@@ -47,6 +48,7 @@ from .profiles import (
     supports_sensor_mode,
     supports_summer_ventilation,
 )
+from .protobuf import ProtobufDecodeError
 from .protocol import (
     ROOM_BOOST_DURATION,
     Operation,
@@ -56,6 +58,7 @@ from .protocol import (
     decode_pairing,
     decode_rooms,
     decode_run_state,
+    decode_schedules,
     decode_summer_ventilation_settings,
     decode_version,
     encode_filter_reset_room,
@@ -81,6 +84,8 @@ COMMAND_SETTLE_TIMEOUT = 10.0
 # A started boost may end this many seconds later than the room's duration
 # allows (clock differences) before it is stopped again as unexpected.
 BOOST_END_TOLERANCE = 300
+SCHEDULES_REFRESH_INTERVAL = 15 * 60.0
+SCHEDULES_REQUEST_TIMEOUT = 4.0
 TEST_REQUEST_TIMEOUT = 6.0
 # Slow sequences read with the filter refresh, each in its own sequence after
 # the optional settings, so a unit that rejects one keeps its other telemetry.
@@ -172,6 +177,10 @@ class ConnectBoxClient:
         }
         # Temporary capture build (see _record_unsolicited).
         self.unsolicited_frames: dict[int, UnsolicitedFrames] = {}
+        self._schedules: Schedules | None = None
+        self._schedules_read: float | None = None
+        self._schedules_unsupported = False
+        self._schedules_retry_after = 0.0
 
     @classmethod
     def pair(
@@ -249,8 +258,13 @@ class ConnectBoxClient:
             tuple[int, tuple[int, int, int]], bytes
         ]
         | None = None,
+        refresh_schedules: bool = False,
     ) -> GatewaySnapshot:
-        """Read a complete state snapshot from the gateway."""
+        """Read a complete state snapshot from the gateway.
+
+        The schedule list is only read again with refresh_schedules, which
+        the regular poll sets; the read-back after a command reuses it.
+        """
         try:
             version = self._version or self._read_version()
             run_state = self._read_run_state()
@@ -268,7 +282,14 @@ class ConnectBoxClient:
                 )
             rooms = self._restore_device_properties(rooms)
             self._remember_device_properties(rooms)
-            return GatewaySnapshot(version, run_state, rooms, summer_settings)
+            schedules = (
+                self._read_schedules(run_state)
+                if refresh_schedules
+                else self._schedules
+            )
+            return GatewaySnapshot(
+                version, run_state, rooms, summer_settings, schedules
+            )
         except (ProtocolError, TransportError):
             self.close()
             raise
@@ -997,6 +1018,57 @@ class ConnectBoxClient:
         entry.last.append(
             (time.time(), operation.reference, operation.result, bytes(body))
         )
+        if operation.type == OperationType.SCHEDULES_NOTIFICATION:
+            # A client changed a schedule; read the list again.
+            self._schedules_read = None
+
+    def _read_schedules(self, run_state: RunState) -> Schedules | None:
+        """Return the schedule list, read again when it may have changed.
+
+        The list is stored on the gateway, so reading it does not use the
+        radio link. It is read at the start, after the gateway announced a
+        change, when the run state names a schedule the list does not have,
+        and otherwise every SCHEDULES_REFRESH_INTERVAL seconds. A gateway
+        that does not answer the request with a list is not asked again until
+        the integration is reloaded.
+        """
+        cached = self._schedules
+        now = time.monotonic()
+        if self._schedules_unsupported or now < self._schedules_retry_after:
+            return cached
+        day_plan = run_state.day_plan
+        fresh = (
+            cached is not None
+            and self._schedules_read is not None
+            and now - self._schedules_read < SCHEDULES_REFRESH_INTERVAL
+            and (
+                run_state.week_plan is None
+                or cached.week_plan(run_state.week_plan) is not None
+            )
+            and (day_plan is None or cached.day_plan(day_plan.plan_id) is not None)
+        )
+        if fresh:
+            return cached
+        try:
+            response = self._connected_session().request(
+                OperationType.SCHEDULES_REQUEST,
+                OperationType.SCHEDULES_CONFIRM,
+                timeout=SCHEDULES_REQUEST_TIMEOUT,
+            )
+            self._schedules = decode_schedules(response.body)
+        except (GatewayResponseError, ProtobufDecodeError):
+            # Keep the snapshot; a refused request may need a new connection.
+            self._schedules_unsupported = True
+            self._schedules = None
+            self.close()
+            return None
+        except ProtocolError:
+            # No usable answer in time: keep the last list and try again later.
+            self._schedules_retry_after = now + SCHEDULES_REFRESH_INTERVAL
+            self.close()
+            return cached
+        self._schedules_read = now
+        return self._schedules
 
     def _read_version(self) -> VersionInfo:
         response = self._connected_session().request(

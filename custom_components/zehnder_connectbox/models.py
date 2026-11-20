@@ -72,6 +72,55 @@ class DayPlan:
     plan_id: int
     name: str | None
     slots: tuple[tuple[int, int], ...]
+    functions: tuple[ScheduledFunction, ...] = ()
+    """Timed functions of the plan; only reported in the schedule list."""
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledFunction:
+    """A timed function of a daily schedule.
+
+    Adding a function for a room in the app (07:00, 20 minutes, the room's
+    boost) added one entry with function 2 and the room's ID. The app's summer
+    daily schedule holds entries with function 5 and room 0, one hour each,
+    for the summer ventilation.
+    """
+
+    start_minute: int
+    function: int
+    duration_minutes: int
+    room_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class WeekPlan:
+    """A weekly schedule: one daily schedule per day, in the gateway's order.
+
+    The app shows the days Monday to Sunday; the order of the seven values was
+    not checked, because both schedules used one daily schedule for all days.
+    """
+
+    plan_id: int
+    name: str | None
+    days: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Schedules:
+    """All daily and weekly schedules stored on the gateway."""
+
+    day_plans: tuple[DayPlan, ...]
+    week_plans: tuple[WeekPlan, ...]
+
+    def day_plan(self, plan_id: int | None) -> DayPlan | None:
+        """Return a daily schedule by ID."""
+        return next((plan for plan in self.day_plans if plan.plan_id == plan_id), None)
+
+    def week_plan(self, plan_id: int | None) -> WeekPlan | None:
+        """Return a weekly schedule by ID."""
+        return next(
+            (plan for plan in self.week_plans if plan.plan_id == plan_id), None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +281,7 @@ class GatewaySnapshot:
     run_state: RunState
     rooms: tuple[Room, ...]
     summer_ventilation_settings: SummerVentilationSettings | None = None
+    schedules: Schedules | None = None
 
     def find_device(self, device_id: int) -> tuple[Room, AttachedDevice] | None:
         """Find a device together with its containing room."""

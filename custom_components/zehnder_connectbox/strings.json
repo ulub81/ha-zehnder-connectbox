@@ -338,6 +338,9 @@
       },
       "day_plan": {
         "name": "Daily schedule"
+      },
+      "week_plan": {
+        "name": "Weekly schedule"
       }
     },
     "switch": {

@@ -102,6 +102,7 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
                             refresh_properties or refresh_filter_properties
                         ),
                         refresh_filter_properties=refresh_filter_properties,
+                        refresh_schedules=True,
                     )
                 )
         except CertificateMismatchError as err:

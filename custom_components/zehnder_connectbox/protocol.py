@@ -15,9 +15,12 @@ from .models import (
     PropertyValue,
     Room,
     RunState,
+    ScheduledFunction,
+    Schedules,
     SummerVentilationSettings,
     VentilationValue,
     VersionInfo,
+    WeekPlan,
 )
 from .protobuf import (
     Field,
@@ -69,6 +72,12 @@ class OperationType(IntEnum):
     VERSION_CONFIRM = 68
     REMOTE_ACCESS_REQUEST = 140
     REMOTE_ACCESS_CONFIRM = 142
+    # The gateway sent the notification with all schedules whenever the
+    # official app saved a daily schedule; the request two numbers below it
+    # returned the same list, like the room and run-state requests.
+    SCHEDULES_REQUEST = 158
+    SCHEDULES_CONFIRM = 159
+    SCHEDULES_NOTIFICATION = 160
     ROOMS_REQUEST = 194
     ROOMS_CONFIRM = 195
     SET_ROOM_REQUEST = 203
@@ -243,7 +252,7 @@ def decode_run_state(message: bytes) -> RunState:
 
 
 def _decode_day_plan(message: bytes | None) -> DayPlan | None:
-    """Decode today's daily schedule from the run state, if reported."""
+    """Decode a daily schedule from the run state or the schedule list."""
     if not message:
         return None
     try:
@@ -255,9 +264,20 @@ def _decode_day_plan(message: bytes | None) -> DayPlan | None:
         slots: list[tuple[int, int]] = []
         for slot in bytes_values(fields, 3):
             slot_fields = decode_fields(slot)
-            # A zero start or situation is omitted from the wire.
+            # A zero start or situation may be omitted from the wire.
             slots.append(
                 (uint_value(slot_fields, 1) or 0, uint_value(slot_fields, 2) or 0)
+            )
+        functions: list[ScheduledFunction] = []
+        for entry in bytes_values(fields, 20):
+            entry_fields = decode_fields(entry)
+            functions.append(
+                ScheduledFunction(
+                    start_minute=uint_value(entry_fields, 1) or 0,
+                    function=uint_value(entry_fields, 2) or 0,
+                    duration_minutes=uint_value(entry_fields, 3) or 0,
+                    room_id=uint_value(entry_fields, 4) or 0,
+                )
             )
     except ProtobufDecodeError:
         return None
@@ -265,7 +285,39 @@ def _decode_day_plan(message: bytes | None) -> DayPlan | None:
         plan_id=plan_id,
         name=raw_name.decode(errors="replace") if raw_name else None,
         slots=tuple(slots),
+        functions=tuple(functions),
     )
+
+
+WEEK_PLAN_DAY_FIELDS = (3, 4, 5, 6, 7, 8, 9)
+
+
+def decode_schedules(message: bytes) -> Schedules:
+    """Decode the list of all daily and weekly schedules."""
+    fields = decode_fields(message)
+    day_plans = tuple(
+        plan
+        for value in bytes_values(fields, 1)
+        if (plan := _decode_day_plan(value)) is not None
+    )
+    week_plans: list[WeekPlan] = []
+    for value in bytes_values(fields, 2):
+        week_fields = decode_fields(value)
+        plan_id = uint_value(week_fields, 1)
+        if plan_id is None:
+            continue
+        raw_name = bytes_value(week_fields, 2)
+        week_plans.append(
+            WeekPlan(
+                plan_id=plan_id,
+                name=raw_name.decode(errors="replace") if raw_name else None,
+                days=tuple(
+                    uint_value(week_fields, number) or 0
+                    for number in WEEK_PLAN_DAY_FIELDS
+                ),
+            )
+        )
+    return Schedules(day_plans=day_plans, week_plans=tuple(week_plans))
 
 
 def decode_summer_ventilation_settings(message: bytes) -> SummerVentilationSettings:

@@ -366,6 +366,17 @@ async def async_get_config_entry_diagnostics(
                 if snapshot.summer_ventilation_settings is not None
                 else None
             ),
+            "week_plan": snapshot.run_state.week_plan,
+            "week_plan_count": (
+                len(snapshot.schedules.week_plans)
+                if snapshot.schedules is not None
+                else None
+            ),
+            "day_plan_count": (
+                len(snapshot.schedules.day_plans)
+                if snapshot.schedules is not None
+                else None
+            ),
             "room_count": len(snapshot.rooms),
             "attached_device_count": len(devices),
         },
