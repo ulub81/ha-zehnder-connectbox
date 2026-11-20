@@ -171,9 +171,7 @@ def _function_room(snapshot: GatewaySnapshot, reference: int | str | None) -> in
             if isinstance(reference, int)
             else (room.name or "").casefold() == reference.strip().casefold()
         )
-        if matches and any(
-            supports_boost(room, device) for device in room.devices
-        ):
+        if matches and any(supports_boost(room, device) for device in room.devices):
             return room.room_id
     raise _error("function_room_invalid")
 

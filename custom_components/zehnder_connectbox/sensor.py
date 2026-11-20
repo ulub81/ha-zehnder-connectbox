@@ -122,7 +122,9 @@ SENSORS = (
             device, EXTRACT_AIR_TEMPERATURE, EXTRACT_AIR_SENSOR_STATUS
         ),
         exists_fn=lambda device: (
-            temperature_value(device, EXTRACT_AIR_TEMPERATURE, EXTRACT_AIR_SENSOR_STATUS)
+            temperature_value(
+                device, EXTRACT_AIR_TEMPERATURE, EXTRACT_AIR_SENSOR_STATUS
+            )
             is not None
         ),
     ),
@@ -307,9 +309,9 @@ async def async_setup_entry(
                     known.add(identity)
         # Today's daily schedule, once the gateway reports one.
         if (
-            (0, "day_plan") not in known
-            and coordinator.data.run_state.day_plan is not None
-        ):
+            0,
+            "day_plan",
+        ) not in known and coordinator.data.run_state.day_plan is not None:
             new_entities.append(ConnectBoxDayPlanSensor(coordinator))
             known.add((0, "day_plan"))
         # The active weekly schedule, once the gateway reports the schedules.
@@ -767,7 +769,9 @@ def _update_state(progress: UpdateProgress | None) -> str | None:
 
 def _device_rooms(snapshot: GatewaySnapshot, device_ids: tuple[int, ...]) -> list[str]:
     names = {
-        device.device_id: room.name for room in snapshot.rooms for device in room.devices
+        device.device_id: room.name
+        for room in snapshot.rooms
+        for device in room.devices
     }
     return [names.get(device_id, str(device_id)) for device_id in device_ids]
 

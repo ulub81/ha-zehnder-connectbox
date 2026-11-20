@@ -148,7 +148,9 @@ RESULT_NOT_EXIST = 7
 RESULT_LOCKED = 9
 # Slow sequences read with the filter refresh, each in its own sequence after
 # the optional settings, so a unit that rejects one keeps its other telemetry.
-SLOW_PROPERTY_SEQUENCES: dict[str, Callable[[AttachedDevice], tuple[PropertySpec, ...]]] = {
+SLOW_PROPERTY_SEQUENCES: dict[
+    str, Callable[[AttachedDevice], tuple[PropertySpec, ...]]
+] = {
     "settings": settings_property_specs_for_device,
     "error_hours": error_hours_property_specs_for_device,
 }
@@ -291,9 +293,7 @@ class ConnectBoxClient:
         *,
         refresh_properties: bool,
         refresh_filter_properties: bool = False,
-        expected_property_values: dict[
-            tuple[int, tuple[int, int, int]], bytes
-        ]
+        expected_property_values: dict[tuple[int, tuple[int, int, int]], bytes]
         | None = None,
         refresh_schedules: bool = False,
     ) -> GatewaySnapshot:
@@ -409,7 +409,9 @@ class ConnectBoxClient:
                     after.run_mode != before.run_mode
                     or after.temperature_mode != before.temperature_mode
                 ):
-                    raise ProtocolError("run mode or situation changed during summer ventilation")
+                    raise ProtocolError(
+                        "run mode or situation changed during summer ventilation"
+                    )
                 confirmed = (
                     after.summer_ventilation_running(time.time()) is True
                     if enabled
@@ -542,8 +544,10 @@ class ConnectBoxClient:
             )
             run_state = self._wait_for(
                 self._read_run_state,
-                lambda state: state.run_mode == RunMode.MANUAL
-                and state.temperature_mode == temperature_mode,
+                lambda state: (
+                    state.run_mode == RunMode.MANUAL
+                    and state.temperature_mode == temperature_mode
+                ),
             )
             if (
                 run_state.run_mode != RunMode.MANUAL
@@ -749,9 +753,7 @@ class ConnectBoxClient:
                 OperationType.SET_DEVICE_PROPERTIES_CONFIRM,
                 encode_property_update(device_id, property_key, expected),
             )
-            self._request_properties(
-                device, optional_property_specs_for_device(device)
-            )
+            self._request_properties(device, optional_property_specs_for_device(device))
             identity = property_key.value_identity
             deadline = time.monotonic() + COMMAND_SETTLE_TIMEOUT
             while True:
@@ -1156,8 +1158,12 @@ class ConnectBoxClient:
         started = False
         try:
             for block in range(blocks):
-                chunk = data[block * UPGRADE_BLOCK_SIZE : (block + 1) * UPGRADE_BLOCK_SIZE]
-                command = UpgradeCommand.START if block == 0 else UpgradeCommand.CONTINUE
+                chunk = data[
+                    block * UPGRADE_BLOCK_SIZE : (block + 1) * UPGRADE_BLOCK_SIZE
+                ]
+                command = (
+                    UpgradeCommand.START if block == 0 else UpgradeCommand.CONTINUE
+                )
                 try:
                     session.request(
                         OperationType.UPGRADE_REQUEST,
@@ -1327,9 +1333,7 @@ class ConnectBoxClient:
         room = self._find_room(room_id)
         if room is None:
             raise CommandValidationError("room_unavailable")
-        if not any(
-            supports_boost(room, device) for device in room.devices
-        ):
+        if not any(supports_boost(room, device) for device in room.devices):
             raise CommandValidationError("boost_unsupported")
         return room
 
@@ -1554,9 +1558,7 @@ class ConnectBoxClient:
         rooms: tuple[Room, ...],
         *,
         include_filter_properties: bool,
-        expected_property_values: dict[
-            tuple[int, tuple[int, int, int]], bytes
-        ]
+        expected_property_values: dict[tuple[int, tuple[int, int, int]], bytes]
         | None = None,
     ) -> tuple[Room, ...]:
         devices = [
@@ -1649,11 +1651,7 @@ class ConnectBoxClient:
                         return core_rooms
 
             if not expected_property_values:
-                if (
-                    fan_state_devices
-                    or optional_devices
-                    or any(slow_devices.values())
-                ):
+                if fan_state_devices or optional_devices or any(slow_devices.values()):
                     return self._read_rooms()
                 return core_rooms
 
@@ -1744,9 +1742,7 @@ class ConnectBoxClient:
             for device in room.devices:
                 cached = self._property_cache.get(self._property_cache_key(device))
                 if cached is not None:
-                    merged = {
-                        value.key.value_identity: value for value in cached
-                    }
+                    merged = {value.key.value_identity: value for value in cached}
                     for value in device.properties:
                         identity = value.key.value_identity
                         # A property read may temporarily expose an empty value.

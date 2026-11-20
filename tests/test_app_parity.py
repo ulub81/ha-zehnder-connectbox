@@ -69,7 +69,9 @@ OPTIONAL = ((38, 0, 9), (38, 0, 10), ROLE)
 def property_record(identity, value):
     key = b"".join(
         encode_uint(number, part)
-        for number, part in zip((1, 2, 3, 4, 5, 6), (30, 255, 0, *identity), strict=True)
+        for number, part in zip(
+            (1, 2, 3, 4, 5, 6), (30, 255, 0, *identity), strict=True
+        )
     )
     return encode_bytes(101, encode_bytes(1, key) + encode_bytes(2, value))
 
@@ -278,9 +280,11 @@ class BoostClientTests(FastSettle):
             (uint_value(fields, 1), uint_value(fields, 15)), (3, 1_800_000_900)
         )
         for room_id, until in ((-1, 0), (3, -1), (True, 0), (3, 1.5)):
-            with self.subTest(room_id=room_id, until=until):
-                with self.assertRaises(ValueError):
-                    encode_room_boost(room_id, until)
+            with (
+                self.subTest(room_id=room_id, until=until),
+                self.assertRaises(ValueError),
+            ):
+                encode_room_boost(room_id, until)
 
     def test_starts_a_boost_for_the_room_duration(self):
         gateway = FakeGateway(boost_duration=30)
@@ -410,9 +414,7 @@ class SummerRoleClientTests(FastSettle):
     def test_refuses_another_property(self):
         client = make_client(FakeGateway(role=1))
         with self.assertRaises(ValueError):
-            client.set_summer_ventilation_role(
-                7, PropertyKey(30, 255, 0, 38, 0, 5), 1
-            )
+            client.set_summer_ventilation_role(7, PropertyKey(30, 255, 0, 38, 0, 5), 1)
 
     def test_reports_a_role_the_unit_did_not_take_over(self):
         gateway = FakeGateway(role=1, apply=False)
@@ -660,6 +662,7 @@ class SessionTests(unittest.TestCase):
                 with self.assertRaises(error):
                     session.request(194, 195)
 
+
 class NotificationTests(unittest.TestCase):
     def test_session_reports_frames_that_answer_no_request(self):
         seen = []
@@ -688,6 +691,7 @@ class NotificationTests(unittest.TestCase):
         )
         session = ConnectBoxSession(transport, GATEWAY, APP)
         self.assertEqual(session.request(194, 195).body, b"answer")
+
 
 # --- unit settings, error log, schedules ------------------------------------------
 
@@ -725,10 +729,14 @@ class ProfileTests(unittest.TestCase):
 
     def test_unit_settings(self):
         device = device_of(
-            rooms_message(runtime=45, extra=(((38, 0, 13), b"\x00"), ((38, 0, 14), b"\x03")))
+            rooms_message(
+                runtime=45, extra=(((38, 0, 13), b"\x00"), ((38, 0, 14), b"\x03"))
+            )
         )
         self.assertEqual(profiles.level_one_runtime(device), 45)
-        self.assertEqual(profiles.level_one_runtime_key(device).value_identity, (38, 0, 9))
+        self.assertEqual(
+            profiles.level_one_runtime_key(device).value_identity, (38, 0, 9)
+        )
         self.assertEqual(profiles.bath_function(device), "locked")
         self.assertEqual(profiles.automatic_sensors(device), "both")
         odd = device_of(rooms_message(runtime=50, extra=(((38, 0, 14), b"\x07"),)))
@@ -738,7 +746,11 @@ class ProfileTests(unittest.TestCase):
 
 
 def run_state_message(
-    *, week_plan=3, day_plan=1, slots=((0, 1), (480, 0), (1260, 1)), name=b"Wintertagesplan"
+    *,
+    week_plan=3,
+    day_plan=1,
+    slots=((0, 1), (480, 0), (1260, 1)),
+    name=b"Wintertagesplan",
 ):
     plan = encode_uint(1, day_plan) + encode_bytes(2, name)
     for minute, mode in slots:
@@ -810,9 +822,11 @@ class SettingClientTests(FastSettle):
         client = make_client(gateway)
         key = self.runtime_key(client)
         for minutes in (0, 10, 50, 90, True):
-            with self.subTest(minutes=minutes):
-                with self.assertRaises(CommandValidationError):
-                    client.set_level_one_runtime(7, key, minutes)
+            with (
+                self.subTest(minutes=minutes),
+                self.assertRaises(CommandValidationError),
+            ):
+                client.set_level_one_runtime(7, key, minutes)
         with self.assertRaises(ValueError):
             client.set_level_one_runtime(7, PropertyKey(30, 255, 0, *ROLE), 60)
         self.assertEqual(gateway.requests, [])
@@ -874,7 +888,8 @@ class ScheduleAndSettingEntityTests(unittest.TestCase):
         return replace(
             data,
             run_state=replace(
-                decode_run_state(run_state_message()), run_mode=kwargs.get("run_mode", 1)
+                decode_run_state(run_state_message()),
+                run_mode=kwargs.get("run_mode", 1),
             ),
         )
 
@@ -920,7 +935,9 @@ class ScheduleAndSettingEntityTests(unittest.TestCase):
             by_key["error_log"].extra_state_attributes["entries"][0],
             {"code": -123, "operating_hours": 27733},
         )
-        plan = next(e for e in entities if isinstance(e, sensor.ConnectBoxDayPlanSensor))
+        plan = next(
+            e for e in entities if isinstance(e, sensor.ConnectBoxDayPlanSensor)
+        )
         self.assertEqual(plan.native_value, "Wintertagesplan")
         self.assertEqual(
             plan.extra_state_attributes,
@@ -1046,7 +1063,9 @@ class ScheduleListTests(unittest.TestCase):
         self.assertGreater(client._schedules_retry_after, 0)
 
     def state(self, week_plan=3, day_plan=1):
-        return decode_run_state(run_state_message(week_plan=week_plan, day_plan=day_plan))
+        return decode_run_state(
+            run_state_message(week_plan=week_plan, day_plan=day_plan)
+        )
 
     def test_list_is_cached_until_it_may_have_changed(self):
         test_plan = day_plan_message(3, "Test", ((0, 1),))
@@ -1118,7 +1137,9 @@ class ScheduleListTests(unittest.TestCase):
             ),
         )
         entities = set_up(sensor, FakeCoordinator(data))
-        week = next(e for e in entities if isinstance(e, sensor.ConnectBoxWeekPlanSensor))
+        week = next(
+            e for e in entities if isinstance(e, sensor.ConnectBoxWeekPlanSensor)
+        )
         self.assertEqual(week.native_value, "Sommerwochenplan")
         attributes = week.extra_state_attributes
         self.assertEqual(attributes["week_plan"], 1)
@@ -1138,7 +1159,9 @@ class ScheduleListTests(unittest.TestCase):
                 }
             ],
         )
-        today = next(e for e in entities if isinstance(e, sensor.ConnectBoxDayPlanSensor))
+        today = next(
+            e for e in entities if isinstance(e, sensor.ConnectBoxDayPlanSensor)
+        )
         self.assertEqual(
             today.extra_state_attributes["functions"][0],
             {
@@ -1176,7 +1199,9 @@ class DiagnosticsTests(unittest.TestCase):
             version=1,
             data={"gateway_uuid": str(GATEWAY), "host": "192.0.2.1"},
         )
-        result = asyncio.run(diagnostics.async_get_config_entry_diagnostics(None, entry))
+        result = asyncio.run(
+            diagnostics.async_get_config_entry_diagnostics(None, entry)
+        )
         self.assertNotIn("capture", result)
         self.assertEqual(result["gateway"]["unsupported_gateway_reads"], ["users"])
         device = result["attached_devices"][0]

@@ -121,9 +121,7 @@ class Schedules:
 
     def week_plan(self, plan_id: int | None) -> WeekPlan | None:
         """Return a weekly schedule by ID."""
-        return next(
-            (plan for plan in self.week_plans if plan.plan_id == plan_id), None
-        )
+        return next((plan for plan in self.week_plans if plan.plan_id == plan_id), None)
 
 
 @dataclass(frozen=True, slots=True)

@@ -36,7 +36,10 @@ async def async_setup_entry(
     """Set up standby and any reported summer ventilation control."""
     coordinator = entry.runtime_data
     async_add_entities(
-        [ConnectBoxVentilationSwitch(coordinator), ConnectBoxPresenceSwitch(coordinator)]
+        [
+            ConnectBoxVentilationSwitch(coordinator),
+            ConnectBoxPresenceSwitch(coordinator),
+        ]
     )
     summer_added = False
 

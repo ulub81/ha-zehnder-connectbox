@@ -96,7 +96,6 @@ async def async_setup_entry(
     entry.async_on_unload(coordinator.async_add_listener(add_level_one_runtimes))
 
 
-
 class ConnectBoxSummerVentilationDuration(ConnectBoxGatewayEntity, NumberEntity):
     """Set the configured duration of a future summer interval in hours."""
 
@@ -235,4 +234,3 @@ class ConnectBoxLevelOneRuntime(ConnectBoxDeviceEntity, NumberEntity):
         if int(value) == self.native_value:
             return
         await self.coordinator.async_set_level_one_runtime(self.device_id, int(value))
-
