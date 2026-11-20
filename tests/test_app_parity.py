@@ -756,6 +756,26 @@ class UnsolicitedFrameTests(unittest.TestCase):
         for private in ("Arbeitszimmer", "SERIAL", other_app.hex()):
             self.assertNotIn(private, text)
 
+    def test_diagnostics_open_a_sixteen_byte_room_value_update(self):
+        update = b"".join(
+            (
+                encode_uint(1, 3),
+                encode_uint(2, 220),
+                encode_uint(7, 0),
+                encode_uint(8, 1),
+                encode_uint(11, 1795204800),
+                encode_uint(14, 5),
+            )
+        )
+        self.assertEqual(len(update), 16)
+        shown = diagnostics._unsolicited_frames(
+            {207: (1, ((1_800_000_000.0, None, None, encode_bytes(1, update)),))}, {}
+        )
+        self.assertEqual(
+            shown["207"]["last"][0]["body"],
+            {"f1": {"f1": 3, "f2": 220, "f7": 0, "f8": 1, "f11": 1795204800, "f14": 5}},
+        )
+
     def test_diagnostics_show_an_empty_body_as_none(self):
         shown = diagnostics._unsolicited_frames(
             {300: (1, ((1_800_000_000.0, 9, 2, b""),))}, {}

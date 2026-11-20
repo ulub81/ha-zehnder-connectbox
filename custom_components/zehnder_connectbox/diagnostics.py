@@ -157,23 +157,37 @@ def _probe(value: bytes, identities: dict[bytes, str], depth: int = 0) -> Any:
     return f"bytes(len={len(value)})"
 
 
+def _small_number_fields(fields: tuple[Field, ...]) -> bool:
+    """Return whether fields are distinct number fields with small numbers."""
+    numbers = [item.number for item in fields]
+    return (
+        bool(fields)
+        and all(item.wire_type is WireType.VARINT for item in fields)
+        and all(number <= 64 for number in numbers)
+        and len(set(numbers)) == len(numbers)
+    )
+
+
 def _frame_structure(value: bytes, identities: dict[bytes, str], depth: int = 0) -> Any:
     """Temporary: show the body of an unsolicited frame by structure.
 
     Like _probe, with three differences for message bodies: nested messages
     are opened up to six levels, values of up to four bytes are shown as
-    numbers even when they look like text, and values of sixteen bytes, the
-    size of a pairing identity, are never opened.
+    numbers even when they look like text, and a value of sixteen bytes, the
+    size of a pairing identity, is opened only when it decodes into distinct
+    small number fields, as a short room-value update does.
     """
     label = identities.get(value)
     if label is not None:
         return f"same as {label}"
     fields: tuple[Field, ...] = ()
-    if value and len(value) != 16 and depth < 6:
+    if value and depth < 6:
         try:
             fields = decode_fields(value)
         except ProtobufDecodeError:
             fields = ()
+    if len(value) == 16 and not _small_number_fields(fields):
+        fields = ()
     if len(value) <= 4:
         short: dict[str, Any] = dict(capture_value(value)) if value else {}
         if fields and all(item.wire_type is WireType.VARINT for item in fields):
