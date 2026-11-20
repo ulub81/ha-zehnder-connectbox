@@ -366,9 +366,6 @@
       },
       "level_one_runtime": {
         "name": "Betriebszeit Lüfterstufe 1/Stunde"
-      },
-      "week_plan": {
-        "name": "Wochenplan (Test)"
       }
     }
   },
@@ -468,12 +465,6 @@
     },
     "level_one_runtime_unavailable": {
       "message": "Das Lüftungsgerät meldet die Betriebszeit der Lüfterstufe 1 derzeit nicht."
-    },
-    "invalid_week_plan": {
-      "message": "Wähle einen Wochenplan zwischen 1 und 8."
-    },
-    "week_plan_mode_unavailable": {
-      "message": "Der Wochenplan kann nur im Zeitplan-Betrieb (automatisch) gewechselt werden."
     },
     "command_rejected": {
       "message": "Die ConnectBox hat den Befehl abgelehnt. Prüfe den Betriebszustand und die Einstellungen in der App."

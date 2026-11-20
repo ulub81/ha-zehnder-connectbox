@@ -52,7 +52,6 @@ from custom_components.zehnder_connectbox.protocol import (
     decode_rooms,
     decode_run_state,
     encode_room_boost,
-    encode_run_state,
     encode_room_number_update,
 )
 from custom_components.zehnder_connectbox.session import (
@@ -967,13 +966,6 @@ class ScheduleProtocolTests(unittest.TestCase):
         self.assertIsNone(state.week_plan)
         self.assertIsNone(state.day_plan)
 
-    def test_run_state_update_carries_the_week_plan_candidate(self):
-        fields = decode_fields(encode_run_state(1, week_plan=2))
-        self.assertEqual(
-            [(field.number, field.value) for field in fields], [(1, 1), (2, 1), (5, 2)]
-        )
-        self.assertEqual(len(decode_fields(encode_run_state(1))), 2)
-
 
 class SettingClientTests(FastSettle):
     def runtime_key(self, client):
@@ -1059,54 +1051,6 @@ class SlowSequenceTests(unittest.TestCase):
         self.assertIn((37, 0, 2), sent)
 
 
-class WeekPlanClientTests(FastSettle):
-    def make(self, *, run_mode=1, apply=True):
-        state = {"week_plan": 1, "run_mode": run_mode}
-        requests = []
-
-        def request(request, confirm, body=b"", **_kwargs):
-            requests.append((request, body))
-            if apply:
-                state["week_plan"] = uint_value(decode_fields(body), 5)
-            return SimpleNamespace(body=b"")
-
-        client = ConnectBoxClient("test.invalid", GATEWAY, APP, "a" * 64)
-        client._connected_session = lambda: SimpleNamespace(request=request)
-        client._read_run_state = lambda: replace(
-            run_state(run_mode=state["run_mode"]), week_plan=state["week_plan"]
-        )
-        client.read_snapshot = lambda **_kwargs: "snapshot"
-        client.close = Mock()
-        return client, state, requests
-
-    def test_switches_the_week_plan_in_schedule_mode(self):
-        client, state, requests = self.make()
-        self.assertEqual(client.set_week_plan(2), "snapshot")
-        ((request, body),) = requests
-        self.assertIs(request, OperationType.SET_RUN_STATE_REQUEST)
-        fields = decode_fields(body)
-        self.assertEqual((uint_value(fields, 1), uint_value(fields, 5)), (1, 2))
-        self.assertEqual(state["week_plan"], 2)
-
-    def test_does_not_write_the_active_plan_or_outside_schedule_mode(self):
-        client, _state, requests = self.make()
-        self.assertEqual(client.set_week_plan(1), "snapshot")
-        client, _state, requests2 = self.make(run_mode=2)
-        with self.assertRaises(CommandValidationError) as raised:
-            client.set_week_plan(2)
-        self.assertEqual(raised.exception.translation_key, "week_plan_mode_unavailable")
-        for plan in (0, 9, True):
-            with self.subTest(plan=plan), self.assertRaises(CommandValidationError):
-                client.set_week_plan(plan)
-        self.assertEqual(requests + requests2, [])
-
-    def test_reports_a_plan_the_gateway_did_not_take_over(self):
-        client, _state, _requests = self.make(apply=False)
-        with self.assertRaisesRegex(ProtocolError, "weekly schedule"):
-            client.set_week_plan(2)
-        client.close.assert_called_once_with()
-
-
 class ScheduleAndSettingEntityTests(unittest.TestCase):
     def snapshot_with_plan(self, message, **kwargs):
         data = snapshot(message, **kwargs)
@@ -1141,26 +1085,6 @@ class ScheduleAndSettingEntityTests(unittest.TestCase):
         for value in (20, 37.5, 90):
             with self.subTest(value=value), self.assertRaises(ServiceValidationError):
                 asyncio.run(entity.async_set_native_value(value))
-
-    def test_week_plan_number_follows_the_run_state(self):
-        coordinator = FakeCoordinator(self.snapshot_with_plan(rooms_message()))
-        calls = []
-
-        async def write(plan):
-            calls.append(plan)
-
-        coordinator.async_set_week_plan = write
-        (entity,) = [
-            item
-            for item in set_up(number, coordinator)
-            if isinstance(item, number.ConnectBoxWeekPlan)
-        ]
-        self.assertEqual(entity.native_value, 1)
-        self.assertTrue(entity.available)
-        asyncio.run(entity.async_set_native_value(2.0))
-        self.assertEqual(calls, [2])
-        coordinator.data = self.snapshot_with_plan(rooms_message(), run_mode=2)
-        self.assertFalse(entity.available)
 
     def test_setting_error_log_and_day_plan_sensors(self):
         message = rooms_message(

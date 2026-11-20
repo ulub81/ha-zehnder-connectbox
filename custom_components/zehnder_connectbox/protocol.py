@@ -294,27 +294,13 @@ def encode_summer_ventilation_settings(enabled: bool, duration_hours: int) -> by
 
 
 def encode_run_state(
-    run_mode: int,
-    user_location: int = 1,
-    *,
-    summer_active: bool | None = None,
-    week_plan: int | None = None,
+    run_mode: int, user_location: int = 1, *, summer_active: bool | None = None
 ) -> bytes:
-    """Build a system run-state update with an optional summer toggle.
-
-    week_plan is a candidate of the test build: the run state reports the
-    active weekly schedule in field 5, so the update carries it in the same
-    field.
-    """
+    """Build a system run-state update with an optional summer toggle."""
     body = encode_uint(1, run_mode) + encode_uint(2, user_location)
     if summer_active is not None:
         body += encode_uint(3, int(summer_active))
-    if week_plan is not None:
-        body += encode_uint(WEEK_PLAN_UPDATE_FIELD, week_plan)
     return body
-
-
-WEEK_PLAN_UPDATE_FIELD = 5
 
 
 def decode_rooms(message: bytes) -> tuple[Room, ...]:

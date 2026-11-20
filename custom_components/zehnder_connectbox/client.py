@@ -87,9 +87,6 @@ SLOW_PROPERTY_SEQUENCES: dict[str, Callable[[AttachedDevice], tuple[PropertySpec
     "settings": settings_property_specs_for_device,
     "error_hours": error_hours_property_specs_for_device,
 }
-# The app keeps up to eight weekly schedules.
-WEEK_PLAN_MINIMUM = 1
-WEEK_PLAN_MAXIMUM = 8
 # The app's manual mode offers the situations at home and away. The run-state
 # update carries them as the user location next to the run mode.
 SITUATION_LOCATIONS = {
@@ -797,40 +794,6 @@ class ConnectBoxClient:
                     encode_room_boost(room_id, 0),
                 )
                 raise ProtocolError("gateway reported an unexpected boost end")
-            return self.read_snapshot(refresh_properties=False)
-        except (ProtocolError, TransportError):
-            self.close()
-            raise
-
-    def set_week_plan(self, plan_id: int) -> GatewaySnapshot:
-        """Temporary test build: switch the active weekly schedule.
-
-        Candidate: the run-state update of the automatic mode with the plan in
-        field 5, where the run state reports the active plan. Confirmed only
-        when the gateway then reports the plan as active.
-        """
-        if (
-            isinstance(plan_id, bool)
-            or not isinstance(plan_id, int)
-            or not WEEK_PLAN_MINIMUM <= plan_id <= WEEK_PLAN_MAXIMUM
-        ):
-            raise CommandValidationError("invalid_week_plan")
-        try:
-            before = self._read_run_state()
-            if before.run_mode != RunMode.AUTOMATIC:
-                raise CommandValidationError("week_plan_mode_unavailable")
-            if before.week_plan == plan_id:
-                return self.read_snapshot(refresh_properties=False)
-            self._connected_session().request(
-                OperationType.SET_RUN_STATE_REQUEST,
-                OperationType.SET_RUN_STATE_CONFIRM,
-                encode_run_state(int(RunMode.AUTOMATIC), week_plan=plan_id),
-            )
-            after = self._wait_for(
-                self._read_run_state, lambda state: state.week_plan == plan_id
-            )
-            if after.week_plan != plan_id:
-                raise ProtocolError("gateway did not switch the weekly schedule")
             return self.read_snapshot(refresh_properties=False)
         except (ProtocolError, TransportError):
             self.close()

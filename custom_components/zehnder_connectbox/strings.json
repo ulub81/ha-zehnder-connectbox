@@ -366,9 +366,6 @@
       },
       "level_one_runtime": {
         "name": "Level 1 runtime per hour"
-      },
-      "week_plan": {
-        "name": "Weekly schedule (test)"
       }
     }
   },
@@ -468,12 +465,6 @@
     },
     "level_one_runtime_unavailable": {
       "message": "The ventilation unit does not currently report the runtime of level 1."
-    },
-    "invalid_week_plan": {
-      "message": "Choose a weekly schedule between 1 and 8."
-    },
-    "week_plan_mode_unavailable": {
-      "message": "The weekly schedule can only be switched in the schedule (automatic) mode."
     },
     "command_rejected": {
       "message": "The ConnectBox rejected the command. Check its operating state and settings in the app."

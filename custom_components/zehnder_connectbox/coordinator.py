@@ -293,22 +293,6 @@ class ZehnderConnectBoxCoordinator(DataUpdateCoordinator[GatewaySnapshot]):
             {"room": room_id, "write": write, "value": value}, command, read_back
         )
 
-    async def async_set_week_plan(self, plan_id: int) -> None:
-        """Temporary test build: switch the active weekly schedule and log it."""
-
-        def read_back(snapshot: GatewaySnapshot) -> dict[str, object]:
-            day_plan = snapshot.run_state.day_plan
-            return {
-                "week_plan": snapshot.run_state.week_plan,
-                "day_plan": day_plan.plan_id if day_plan is not None else None,
-            }
-
-        await self._async_logged_write(
-            {"write": "week_plan", "value": plan_id},
-            partial(self.client.set_week_plan, plan_id),
-            read_back,
-        )
-
     async def _async_logged_write(
         self,
         details: dict[str, object],
